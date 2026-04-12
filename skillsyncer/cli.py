@@ -869,17 +869,27 @@ def cmd_publish(args: argparse.Namespace) -> int:
         msg_lines.append(f"- {s['name']} (reference \u2192 {s['upstream']})")
     msg = "\n".join(msg_lines)
 
+    # Stage only the skill paths this run actually touched (one
+    # top-level dir per published skill). ``--all`` scoped to those
+    # paths picks up additions, modifications, AND deletions inside
+    # them — important when switching a skill from vendor → reference,
+    # which wipes the old tree. Skipped skills, and any unrelated
+    # dirty files in the source repo, are intentionally left alone.
+    touched_paths = [s["name"] for s in published]
     try:
-        subprocess.run(["git", "-C", str(target_path), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(target_path), "add", "--all", "--", *touched_paths],
+            check=True,
+        )
         diff = subprocess.run(
-            ["git", "-C", str(target_path), "diff", "--cached", "--quiet"],
+            ["git", "-C", str(target_path), "diff", "--cached", "--quiet", "--", *touched_paths],
             check=False,
         )
         if diff.returncode == 0:
             _out("\n[skillsyncer] no changes to commit (skills already match the source).")
             return 0
         subprocess.run(
-            ["git", "-C", str(target_path), "commit", "-m", msg],
+            ["git", "-C", str(target_path), "commit", "-m", msg, "--", *touched_paths],
             check=True,
         )
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
