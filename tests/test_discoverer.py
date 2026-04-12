@@ -254,6 +254,323 @@ def test_walker_descends_arbitrary_depth(tmp_path):
     assert "RESEARCH_API_KEY" in keys
 
 
+def test_openclaw_json_deeply_nested_creds(tmp_path):
+    """The real shape we hit on a live OpenClaw machine: credentials
+    are scattered across deeply nested paths under custom names.
+    The recursive extractor + path-based name synthesis must find
+    them all."""
+    home = tmp_path / "home"
+    openclaw = home / ".openclaw"
+    openclaw.mkdir(parents=True)
+    (openclaw / "openclaw.json").write_text("""
+{
+  "channels": {
+    "feishu": {"appSecret": "feishu-app-secret-xxxx"},
+    "msteams": {"appPassword": "ms-app-password-yyyy"}
+  },
+  "gateway": {
+    "auth": {
+      "token": "gateway-token-zzz",
+      "password": "gateway-pw-aaa"
+    }
+  },
+  "skills": {
+    "entries": {
+      "goplaces": {"apiKey": "goplaces-key-bbb"},
+      "agentmail": {"env": {"AGENTMAIL_API_KEY": "agentmail-key-ccc"}}
+    }
+  },
+  "models": {
+    "providers": {
+      "minimax": {
+        "apiKey": "minimax-key-ddd",
+        "baseUrl": "https://api.minimax.chat/v1"
+      }
+    }
+  },
+  "plugins": {
+    "entries": {
+      "brave": {
+        "config": {
+          "webSearch": {"apiKey": "brave-search-key-eee"}
+        }
+      }
+    }
+  },
+  "env": {
+    "MINIMAX_API_KEY": "top-level-env-fff"
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+
+    # Path-synthesized names from nested apiKey/secret/token leaves.
+    assert "BRAVE_API_KEY" in keys              # plugins.entries.brave.…apiKey
+    assert "GOPLACES_API_KEY" in keys           # skills.entries.goplaces.apiKey
+    assert "MINIMAX_API_KEY" in keys            # models.providers.minimax.apiKey
+    assert "FEISHU_APP_SECRET" in keys          # channels.feishu.appSecret
+    assert "MSTEAMS_APP_PASSWORD" in keys       # channels.msteams.appPassword
+    assert "GATEWAY_TOKEN" in keys              # gateway.auth.token (auth is generic)
+    assert "GATEWAY_PASSWORD" in keys           # gateway.auth.password
+
+    # Already-envvar-style nested under env: kept as-is.
+    assert "AGENTMAIL_API_KEY" in keys
+
+
+def test_recursive_extractor_skips_non_credential_keys(tmp_path):
+    """preKey, registrationId, etc. must NOT be picked up just
+    because they contain 'Key'/'Id'."""
+    home = tmp_path / "home"
+    openclaw = home / ".openclaw"
+    openclaw.mkdir(parents=True)
+    (openclaw / "session.json").write_text("""
+{
+  "remoteJid": "user@example.com",
+  "registrationId": 12345,
+  "preKey": {"id": 1, "publicKey": "abc"},
+  "noiseKey": "noise-value"
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    # None of these should leak through.
+    for k in ("REMOTEJID", "REGISTRATION_ID", "PRE_KEY", "NOISE_KEY"):
+        assert k not in keys
+
+
+def test_recursive_extractor_skips_boring_files(tmp_path):
+    """package.json must not be parsed even if it contains
+    credential-shaped keys (which it occasionally does in scripts)."""
+    home = tmp_path / "home"
+    cursor = home / ".cursor"
+    cursor.mkdir(parents=True)
+    (cursor / "package.json").write_text("""
+{
+  "scripts": {
+    "deploy": "API_KEY=xxx npm run real"
+  },
+  "config": {
+    "apiKey": "should-not-appear"
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "CONFIG_API_KEY" not in keys
+    assert "PACKAGE_API_KEY" not in keys
+
+
+def test_openclaw_auth_profiles_json(tmp_path):
+    """openclaw stores per-agent auth credentials at
+    ~/.openclaw/agents/<id>/agent/auth-profiles.json. Confirmed
+    against openclaw/openclaw src/agents/auth-profiles/paths.ts."""
+    home = tmp_path / "home"
+    auth = home / ".openclaw" / "agents" / "feishu" / "agent"
+    auth.mkdir(parents=True)
+    (auth / "auth-profiles.json").write_text("""
+{
+  "version": 1,
+  "profiles": {
+    "anthropic:manual": {
+      "provider": "anthropic",
+      "token": "ant-token-fake-1234567890"
+    },
+    "openai-codex:default": {
+      "provider": "openai-codex",
+      "apiKey": "sk-codex-fake-1234567890"
+    }
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    # synthesized via 'profiles' container → entity = profile id
+    assert any("ANTHROPIC" in k and "TOKEN" in k for k in keys), keys
+    assert any("OPENAI_CODEX" in k or "CODEX" in k for k in keys), keys
+
+
+def test_openclaw_models_json_provider_keys(tmp_path):
+    """openclaw stores generated provider configs at
+    ~/.openclaw/agents/<id>/agent/models.json with provider apiKey
+    fields. Confirmed against the secrets-audit doc."""
+    home = tmp_path / "home"
+    agent = home / ".openclaw" / "agents" / "default" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "models.json").write_text("""
+{
+  "providers": {
+    "minimax": {"apiKey": "minimax-fake-key-xxx"},
+    "minimax-cn": {"apiKey": "minimax-cn-fake-key-yyy"}
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "MINIMAX_API_KEY" in keys
+    # camelCase to snake: "minimax-cn" -> hyphen normalized to _
+    assert "MINIMAX_CN_API_KEY" in keys
+
+
+def test_openclaw_legacy_clawdbot_dir(tmp_path):
+    """openclaw still reads ~/.clawdbot/ as a legacy state dir."""
+    home = tmp_path / "home"
+    legacy = home / ".clawdbot"
+    legacy.mkdir(parents=True)
+    (legacy / "clawdbot.json").write_text(
+        '{"plugins":{"entries":{"brave":{"config":{"webSearch":{"apiKey":"legacy-brave-xxx"}}}}}}'
+    )
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "BRAVE_API_KEY" in keys
+
+
+def test_openclaw_home_env_override(tmp_path):
+    """OPENCLAW_HOME / OPENCLAW_STATE_DIR move the state dir;
+    discoverer follows."""
+    home = tmp_path / "home"
+    home.mkdir()
+    custom = tmp_path / "custom-openclaw"
+    custom.mkdir()
+    (custom / "openclaw.json").write_text(
+        '{"plugins":{"entries":{"brave":{"config":{"webSearch":{"apiKey":"custom-brave-xxx"}}}}}}'
+    )
+    result = discover(
+        home=home, cwd=tmp_path,
+        env={"OPENCLAW_STATE_DIR": str(custom)},
+    )
+    keys = {c["key"] for c in result["credentials"]}
+    assert "BRAVE_API_KEY" in keys
+
+
+def test_hermes_real_shape(tmp_path):
+    """hermes-agent uses ~/.hermes/config.yaml + ~/.hermes/.env.
+    Both must surface. Confirmed against NousResearch/hermes-agent
+    hermes_cli/config.py module docstring."""
+    home = tmp_path / "home"
+    hermes = home / ".hermes"
+    hermes.mkdir(parents=True)
+    (hermes / ".env").write_text(
+        "OPENROUTER_API_KEY=or-fake-key-xxx\n"
+        "HF_TOKEN=hf_fake_token_xxx\n"
+    )
+    (hermes / "config.yaml").write_text("""
+model:
+  default: anthropic/claude-opus-4.6
+  provider: openrouter
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "OPENROUTER_API_KEY" in keys
+    assert "HF_TOKEN" in keys
+
+
+def test_synthesized_names_match_placeholder_grammar(tmp_path):
+    """Synthesized names must satisfy ``[A-Z_][A-Z0-9_]*`` so they
+    can actually be used in ${{...}} placeholders. Profile ids like
+    ``anthropic:manual`` must be normalized."""
+    home = tmp_path / "home"
+    auth = home / ".openclaw" / "agents" / "feishu" / "agent"
+    auth.mkdir(parents=True)
+    (auth / "auth-profiles.json").write_text("""
+{
+  "profiles": {
+    "anthropic:manual": {"token": "ant-token-fake-1234567890"}
+  }
+}
+""")
+    import re as _re
+    grammar = _re.compile(r"^[A-Z_][A-Z0-9_]*$")
+    result = discover(home=home, cwd=tmp_path, env={})
+    for c in result["credentials"]:
+        assert grammar.match(c["key"]), f"key {c['key']!r} would be rejected by ${{{{...}}}}"
+
+
+def test_filename_stem_used_when_no_path_entity(tmp_path):
+    """Bare ``token`` in ``auth.json`` becomes ``AUTH_TOKEN``,
+    not just ``TOKEN``."""
+    home = tmp_path / "home"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    (codex / "auth.json").write_text("""
+{
+  "tokens": {
+    "access_token": "access-fake-1234567890",
+    "id_token": "id-fake-1234567890",
+    "refresh_token": "refresh-fake-1234567890"
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "AUTH_ACCESS_TOKEN" in keys
+    assert "AUTH_ID_TOKEN" in keys
+    assert "AUTH_REFRESH_TOKEN" in keys
+    # The bare ones should NOT appear.
+    assert "ACCESS_TOKEN" not in keys
+    assert "REFRESH_TOKEN" not in keys
+
+
+def test_msal_token_cache_files_skipped(tmp_path):
+    """m365-token-cache.json and similar must NOT pollute the
+    credential list — they're protocol caches with synthesized
+    UUID-shaped keys."""
+    home = tmp_path / "home"
+    cred_dir = home / ".openclaw" / "credentials"
+    cred_dir.mkdir(parents=True)
+    (cred_dir / "m365-token-cache.json").write_text("""
+{
+  "AccessToken": {
+    "very-long-uuid-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb-cccccccccccccccc": {
+      "secret": "should-not-appear"
+    }
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    # The synthesized name from this path would be > 64 chars and
+    # the filename matches the cache noise pattern. Either filter
+    # is enough; both apply here.
+    for c in result["credentials"]:
+        assert "m365-token-cache" not in c["source"], c
+        assert len(c["key"]) <= 64, c["key"]
+
+
+def test_whatsapp_session_files_skipped(tmp_path):
+    """WhatsApp session-*.json / pre-key-*.json are protocol primitives,
+    not user credentials, even though they contain key/secret-named fields."""
+    home = tmp_path / "home"
+    wa = home / ".openclaw" / "credentials" / "whatsapp" / "default"
+    wa.mkdir(parents=True)
+    (wa / "session-1234567890_1.0.json").write_text(
+        '{"currentRatchet": {"rootKey": "ratchet-noise-xxx"}}'
+    )
+    (wa / "pre-key-2771.json").write_text(
+        '{"keyPair": {"private": "private-key-noise-xxx"}}'
+    )
+    result = discover(home=home, cwd=tmp_path, env={})
+    for c in result["credentials"]:
+        assert "session-" not in c["source"], c
+        assert "pre-key-" not in c["source"], c
+
+
+def test_arbitrary_yaml_filename_is_scanned(tmp_path):
+    """The point of dropping the filename allowlist: ANY .yaml in
+    an AI tool dir is parsed, regardless of what it's called."""
+    home = tmp_path / "home"
+    custom = home / ".openclaw" / "weird-custom-name.yaml"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("""
+plugins:
+  entries:
+    brave:
+      apiKey: brave-from-yaml-xxx
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "BRAVE_API_KEY" in keys
+
+
 def test_walker_safe_against_symlink_loops(tmp_path):
     """A symlink that points back at an ancestor must not hang the scan."""
     home = tmp_path / "home"

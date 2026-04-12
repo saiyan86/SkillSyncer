@@ -130,7 +130,7 @@ def credential_scan_locations(
     _add(home / ".kube" / "config", "home")
 
     # AI tool config dirs (system-wide sweep)
-    for d in _ai_tool_dirs(home):
+    for d in _ai_tool_dirs(home, env_map):
         _add(d, "ai-tool")
 
     # Shell environment — represented as a single entry, since we
@@ -265,10 +265,10 @@ def _discover_credentials(home: Path, cwd: Path, env: dict) -> list[dict]:
         for k, v in _parse_env_file(path):
             _add(k, v, display, str(path))
 
-    # System-wide sweep across well-known AI / agent tool config dirs.
-    # Each dir is scanned for known credential file names; we also walk
-    # one level deep so per-profile configs are picked up.
-    for tool_dir in _ai_tool_dirs(home):
+    # System-wide sweep across well-known AI / agent tool config dirs,
+    # plus any locations the user has pointed at via env overrides
+    # (OPENCLAW_HOME, HERMES_HOME, ...).
+    for tool_dir in _ai_tool_dirs(home, env):
         for k, v, source, path in _scan_tool_dir(tool_dir, home):
             _add(k, v, source, path)
 
@@ -332,9 +332,18 @@ def _parse_env_file(path: Path) -> list[tuple[str, str]]:
 # Well-known AI / agent tool config directories. We scan these
 # system-wide for credential files. New tools can be added freely;
 # misses are silent and cheap.
+#
+# Verified against the open-source projects themselves:
+# - openclaw stores credentials in ~/.openclaw/openclaw.json and
+#   ~/.openclaw/agents/<id>/agent/auth-profiles.json (legacy:
+#   ~/.clawdbot/, clawdbot.json). See openclaw/openclaw repo
+#   src/config/paths.ts and src/agents/auth-profiles/paths.ts.
+# - hermes-agent stores credentials in ~/.hermes/config.yaml and
+#   ~/.hermes/.env. See NousResearch/hermes-agent hermes_cli/config.py.
 _AI_TOOL_HOME_DIRS = [
     # Direct ~ subdirs
     ".claude", ".claude-cowork", ".cursor", ".codex", ".openclaw",
+    ".clawdbot",  # legacy openclaw (pre-rebrand)
     ".hermes", ".gemini", ".windsurf", ".zed", ".fleet",
     ".continue", ".aider", ".cody", ".tabnine",
     ".anthropic", ".openai", ".litellm", ".llm",
@@ -357,27 +366,48 @@ _AI_TOOL_HOME_DIRS = [
     "Library/Application Support/Aider",
 ]
 
-# Filenames inside any AI tool dir we'll parse for credentials.
-# Includes MCP-server config conventions used by Claude Desktop,
-# Cursor, OpenClaw, Continue.dev, etc.
-_CRED_FILE_NAMES = {
-    ".env", ".env.local", ".env.production",
-    "config.env", "auth.env",
-    "credentials", "credentials.json",
-    "credentials.yaml", "credentials.yml",
-    "secrets.json", "secrets.yaml", "secrets.yml",
-    "config.json", "config.yaml", "config.yml",
-    "settings.json", "auth.json", ".auth",
-    # MCP / tool server configs
-    "mcp.json", "mcp_servers.json", "mcp-servers.json",
-    "claude_desktop_config.json",
-    "servers.json", "tools.json", "extensions.json",
-    "agent.yaml", "agent.yml", "agent.json",
+
+def _env_override_dirs(env: dict) -> list[Path]:
+    """Honor agent-specific HOME/STATE env overrides.
+
+    Some agents let users move their state dir via an env var. We
+    pick those up so the discoverer follows wherever the agent
+    actually lives.
+    """
+    out: list[Path] = []
+    for var in (
+        "OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_AGENT_DIR",
+        "PI_CODING_AGENT_DIR",  # legacy openclaw alias
+        "HERMES_HOME", "CLAUDE_HOME", "CURSOR_HOME",
+    ):
+        raw = env.get(var)
+        if raw and raw.strip():
+            out.append(Path(raw).expanduser())
+    return out
+
+# Files we explicitly do NOT scan even if they're in an AI tool dir.
+# Pure dependency-management noise — never holds credentials, often
+# huge, would just slow the walker down.
+_BORING_FILES = {
+    "package.json", "package-lock.json", "yarn.lock",
+    "pnpm-lock.yaml", "npm-shrinkwrap.json",
+    "tsconfig.json", "tsconfig.base.json",
+    "composer.json", "composer.lock",
+    "Cargo.lock", "Pipfile.lock", "poetry.lock",
+    "go.sum", "go.mod",
 }
+
+# A handful of fixed names we recognize even though they have no
+# extension or use an unusual one. The recursive extractor handles
+# all the structured-config cases — this list only catches plain
+# secret files like ``credentials`` and ``.auth``.
+_NO_EXT_CRED_NAMES = {"credentials", "auth", ".auth", "config.env", "auth.env"}
 
 # Subdirectory names that are noise — skip them when walking.
 # Mostly Electron / Chromium / VS Code caches that can contain
-# tens of thousands of files we never want to read.
+# tens of thousands of files we never want to read, plus anything
+# that's clearly example/template/backup material rather than the
+# user's live config.
 _WALK_SKIP_DIRS = {
     # Build / language / dep junk
     "node_modules", "venv", ".venv", "__pycache__", ".git",
@@ -394,25 +424,249 @@ _WALK_SKIP_DIRS = {
     "Session Storage", "WebStorage", "WebRTC Logs",
     # VS Code workspace state
     "workspaceStorage", "globalStorage", "History",
+    # Examples / templates / fixtures — not user config
+    "examples", "example", "templates", "template",
+    "test", "tests", "fixtures", "samples", "sample",
+    "tutorials", "tutorial", "demo", "demos",
+    # Backups — stale, not the user's live state
+    "backup", "backups", "bak", "old",
 }
 
-_AGENT_CRED_KEYS = ("secrets", "credentials", "env", "environment", "api_keys", "keys")
+# Filename patterns that indicate protocol caches / session stores /
+# backups. These hold credential-shaped fields with auto-generated
+# key names (UUIDs, base64 blobs, ratchet roots, ...) that aren't
+# the user-meaningful API keys we're trying to surface.
+_NOISE_FILE_PATTERNS = [
+    re.compile(r"cache", re.IGNORECASE),                       # m365-token-cache.json, *Cache*
+    re.compile(r"^session[-_]", re.IGNORECASE),                # WhatsApp / Signal session
+    re.compile(r"^pre[-_]?key[-_]", re.IGNORECASE),            # Signal pre-keys
+    re.compile(r"^lid[-_]mapping[-_]", re.IGNORECASE),
+    re.compile(r"^sender[-_]key[-_]", re.IGNORECASE),
+    re.compile(r"^tctoken[-_]", re.IGNORECASE),
+    re.compile(r"^app[-_]?state[-_]?sync[-_]", re.IGNORECASE),
+    re.compile(r"\.bak(\.|$)", re.IGNORECASE),                 # *.bak, *.bak.1
+]
 
-# Containers whose entries each have a nested env block. This is the
-# MCP / tool-server convention shared by Claude Desktop, OpenClaw,
-# Cursor, Continue, Windsurf, etc.
-_AGENT_SERVER_KEYS = ("mcpServers", "mcp_servers", "servers", "tools", "extensions")
+_MAX_SYNTH_NAME_LEN = 64  # anything longer is almost certainly auto-generated
+
+# Leaf key names that strongly indicate a credential value, regardless
+# of the surrounding structure. The recursive extractor pulls every
+# matching leaf and synthesizes a useful name from the path.
+#
+# Each suffix (Key / Token / Password / Secret) only matches when
+# preceded by an *explicit credential-shaped prefix* — that's how
+# we keep ``apiKey`` / ``appPassword`` / ``privateKey`` in while
+# keeping protocol primitives like ``preKey`` / ``noiseKey`` /
+# ``publicKey`` / ``registrationId`` out.
+_LEAF_CRED_PATTERN = re.compile(
+    r"^("
+    # *Key — only with explicit credential prefixes
+    r"(?:api|app|client|access|secret|master|admin|root|user|auth"
+    r"|private|signing|encryption|rsa|aes|hmac|jwt)[_\-]?key|"
+    # *Token — most cred tokens; bare ``token`` allowed
+    r"(?:access|auth|bearer|id|refresh|session|api|client|app|oauth)?[_\-]?token|"
+    # *Password / *Passwd — bare or with a common prefix
+    r"(?:app|user|admin|root|db|database|master)?[_\-]?password|"
+    r"(?:app|user|admin|root|db|database|master)?[_\-]?passwd|"
+    # *Secret — bare or with a common prefix
+    r"(?:app|client|api|master|jwt|oauth|consumer)?[_\-]?secret|"
+    # Bearer credentials
+    r"bearer|"
+    # Webhooks
+    r"webhook|webhook[_\-]?url|"
+    # Connection strings / DSNs
+    r"(?:db|database)?[_\-]?connection[_\-]?string|dsn|"
+    # Pure ``credentials`` leaf (rare but happens)
+    r"credentials?"
+    r")$",
+    re.IGNORECASE,
+)
+
+# Path components that introduce a NAMED ENTITY at the next position.
+# When we see ``plugins.entries.brave.config.webSearch.apiKey``, the
+# component immediately after ``entries`` (i.e. ``brave``) is the
+# entity name we want to use when synthesizing the credential name.
+_NAMED_ENTITY_CONTAINERS = {
+    "entries", "providers", "servers", "accounts", "channels",
+    "plugins", "tools", "skills", "agents", "models", "extensions",
+    "mcpServers", "mcp_servers",
+}
+
+# Path components that are pure structure — never useful as the
+# entity name when synthesizing.
+_GENERIC_PATH_NAMES = {
+    "entries", "providers", "servers", "accounts", "channels",
+    "plugins", "tools", "skills", "agents", "models", "extensions",
+    "mcpServers", "mcp_servers",
+    "config", "configs", "value", "values", "env", "environment",
+    "auth", "credentials", "secrets", "keys", "defaults",
+    "default", "list", "items", "options", "settings", "properties",
+    "data", "spec", "info", "params", "args", "arguments",
+    "common", "global", "shared",
+    "tokens", "identities", "profiles", "current", "latest",
+    "main", "primary", "active",
+}
 
 
-def _is_cred_filename(name: str) -> bool:
-    if name in _CRED_FILE_NAMES:
+def _is_scannable_filename(name: str) -> bool:
+    """True if the file is worth opening for credential extraction.
+
+    The strategy is "parse everything structured, except known noise".
+    The leaf-key shape is what filters out false positives — not the
+    filename — so we accept any ``.json`` / ``.yaml`` / ``.yml`` /
+    ``.env*`` file plus a couple of fixed names.
+
+    Excluded:
+    - dependency-management lockfiles / manifests (``_BORING_FILES``)
+    - protocol cache / session files (``_NOISE_FILE_PATTERNS``)
+    """
+    if name in _BORING_FILES:
+        return False
+    for pat in _NOISE_FILE_PATTERNS:
+        if pat.search(name):
+            return False
+    if name in _NO_EXT_CRED_NAMES:
         return True
     lower = name.lower()
-    return lower.endswith(".env") or lower.endswith(".env.local")
+    if lower.endswith(".json") or lower.endswith((".yaml", ".yml")):
+        return True
+    if lower.endswith((".env", ".env.local", ".env.production")):
+        return True
+    # Catch *.env style names like "agent.env" / "production.env"
+    if ".env" in lower and not lower.endswith((".envrc",)):
+        return True
+    return False
 
 
-def _ai_tool_dirs(home: Path) -> list[Path]:
-    return [home / rel for rel in _AI_TOOL_HOME_DIRS]
+def _is_envvar_style(name: str) -> bool:
+    """True for UPPER_SNAKE_CASE names like ``BRAVE_API_KEY``.
+
+    These are already in the form a user / shell would expect, so the
+    extractor uses them as-is instead of synthesizing from the path.
+    """
+    return bool(re.match(r"^[A-Z][A-Z0-9_]*$", name)) and "_" in name
+
+
+def _camel_to_upper_snake(name: str) -> str:
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    name = re.sub(r"[-\s]+", "_", name)
+    return name.upper()
+
+
+def _sanitize_placeholder_name(name: str) -> str | None:
+    """Force a synthesized name to match SkillSyncer's placeholder
+    grammar: ``[A-Z_][A-Z0-9_]*``.
+
+    Replaces any non-alphanumeric character with ``_``, collapses
+    runs of underscores, strips leading underscores until the first
+    char is a letter, and uppercases. Returns ``None`` if nothing
+    valid remains (e.g. an all-numeric leaf).
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", name)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        return None
+    if cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned.upper()
+
+
+# Bare leaves that mean nothing on their own — without an entity
+# prefix they're useless to the user (ACCESS_TOKEN / TOKEN / SECRET).
+_LEAF_NEEDS_ENTITY = {
+    "TOKEN", "ACCESS_TOKEN", "ID_TOKEN", "REFRESH_TOKEN",
+    "SECRET", "PASSWORD", "PASSWD", "KEY", "API_KEY",
+    "BEARER", "WEBHOOK", "DSN",
+}
+
+
+def _synth_cred_name(
+    path: tuple[str, ...],
+    file_stem: str | None = None,
+) -> str | None:
+    """Build an UPPER_SNAKE credential name from a path-in-tree.
+
+    Strategy:
+    1. Scan the path for one of ``_NAMED_ENTITY_CONTAINERS`` and
+       use the next non-generic component as the entity. Deepest
+       entity wins.
+    2. Otherwise, use the nearest non-generic ancestor in the path.
+    3. Otherwise, fall back to the file stem (filename without
+       extension) so a bare ``token`` field in ``auth.json`` becomes
+       ``AUTH_TOKEN`` instead of just ``TOKEN``.
+    4. Sanitize against the placeholder grammar (``[A-Z_][A-Z0-9_]*``).
+    5. Reject anything > 64 chars — that's an auto-generated cache key.
+    """
+    leaf = path[-1]
+    parts = list(path[:-1])
+    entity: str | None = None
+
+    for i, part in enumerate(parts):
+        if part in _NAMED_ENTITY_CONTAINERS and i + 1 < len(parts):
+            candidate = parts[i + 1]
+            if candidate not in _GENERIC_PATH_NAMES and not candidate.isdigit():
+                entity = candidate  # deepest wins
+
+    if entity is None:
+        for part in reversed(parts):
+            if part not in _GENERIC_PATH_NAMES and not part.isdigit():
+                entity = part
+                break
+
+    raw = f"{entity}_{leaf}" if entity else leaf
+    snake = _camel_to_upper_snake(raw)
+    sanitized = _sanitize_placeholder_name(snake)
+
+    # Bare-leaf rescue: if the result is just a generic word like
+    # TOKEN / ACCESS_TOKEN / SECRET, prepend the file stem as entity.
+    if sanitized in _LEAF_NEEDS_ENTITY and file_stem:
+        stem_clean = _sanitize_placeholder_name(_camel_to_upper_snake(file_stem))
+        if stem_clean and stem_clean not in {"AUTH", "CONFIG", "SECRETS", "CREDENTIALS"}:
+            sanitized = f"{stem_clean}_{sanitized}"
+        elif stem_clean:
+            # auth.json → AUTH is generic, but pairing with the leaf is
+            # still better than the bare leaf.
+            sanitized = f"{stem_clean}_{sanitized}"
+
+    if not sanitized or len(sanitized) > _MAX_SYNTH_NAME_LEN:
+        return None
+    return sanitized
+
+
+def _walk_creds_in_obj(data, path: tuple[str, ...] = (), file_stem: str | None = None):
+    """Recursively yield ``(key_name, value)`` for credential-shaped
+    leaves anywhere in a parsed JSON/YAML tree."""
+    if isinstance(data, dict):
+        for k, v in data.items():
+            new_path = path + (str(k),)
+            if isinstance(v, dict) or isinstance(v, list):
+                yield from _walk_creds_in_obj(v, new_path, file_stem)
+                continue
+            if v is None or v == "":
+                continue
+            if not isinstance(v, (str, int, float, bool)):
+                continue
+            value_str = str(v)
+            if not value_str.strip():
+                continue
+
+            key_str = str(k)
+            if _LEAF_CRED_PATTERN.match(key_str):
+                synth = _synth_cred_name(new_path, file_stem=file_stem)
+                if synth is not None:
+                    yield synth, value_str
+            elif _is_envvar_style(key_str) and _looks_credential(key_str):
+                yield key_str, value_str
+    elif isinstance(data, list):
+        for i, item in enumerate(data):
+            yield from _walk_creds_in_obj(item, path + (str(i),), file_stem)
+
+
+def _ai_tool_dirs(home: Path, env: dict | None = None) -> list[Path]:
+    out = [home / rel for rel in _AI_TOOL_HOME_DIRS]
+    if env is not None:
+        out.extend(_env_override_dirs(env))
+    return out
 
 
 def _scan_tool_dir(tool_dir: Path, home: Path):
@@ -429,10 +683,10 @@ def _scan_tool_dir(tool_dir: Path, home: Path):
             display = path.name
 
         lower = path.name.lower()
-        if lower.endswith(".json") or lower.endswith((".yaml", ".yml")):
+        if lower.endswith((".json", ".yaml", ".yml")):
             pairs = _parse_agent_config(path)
         else:
-            # .env, .env.local, credentials, settings, auth — line-based
+            # .env, .env.local, credentials, auth — line-based
             pairs = _parse_env_file(path)
 
         for k, v in pairs:
@@ -440,10 +694,9 @@ def _scan_tool_dir(tool_dir: Path, home: Path):
 
 
 def _walk_for_cred_files(root: Path):
-    """Yield ``Path`` objects for files matching ``_is_cred_filename``,
-    walking ``root`` exhaustively.
+    """Yield every file under ``root`` worth opening for credentials.
 
-    Safety nets that make unbounded depth safe in practice:
+    Walk strategy:
 
     - ``os.walk(..., followlinks=False)`` so symlink loops can't hang
       the scan and we never wander out of the root via a stray link.
@@ -452,8 +705,12 @@ def _walk_for_cred_files(root: Path):
     - Hidden subdirectories *below* the root are skipped. The root
       itself is allowed to be hidden — that's how we got into
       ``~/.openclaw`` in the first place.
-    - The filename allowlist is the real filter: even if we walk
-      10k directories, we only ever read a handful of files.
+
+    Filter strategy: parse anything structured (.json / .yaml / .yml /
+    .env*), minus a tiny denylist of dependency-management noise
+    (package.json, lockfiles). The recursive cred extractor's leaf-
+    key shape is the *real* filter — file names are unreliable across
+    agents, every tool ships its config under a different name.
     """
     if not _is_dir_safe(root):
         return
@@ -466,7 +723,7 @@ def _walk_for_cred_files(root: Path):
             and (is_root_level or not d.startswith("."))
         ]
         for fname in filenames:
-            if _is_cred_filename(fname):
+            if _is_scannable_filename(fname):
                 yield Path(dirpath) / fname
 
 
@@ -477,81 +734,45 @@ def _is_dir_safe(p: Path) -> bool:
         return False
 
 
-def _parse_agent_config(path: Path) -> list[tuple[str, str]]:
-    """Pull credential-shaped key/value pairs out of an agent config file.
+_MAX_CONFIG_FILE_SIZE = 5 * 1024 * 1024  # 5 MB; bigger files are state, not config
 
-    Looks for a top-level dict whose key is one of ``secrets``,
-    ``credentials``, ``env``, ``environment``, ``api_keys``, ``keys``,
-    and treats the contents as flat ``KEY: value`` pairs. Also pulls
-    any top-level keys whose names match the credential pattern.
+
+def _parse_agent_config(path: Path) -> list[tuple[str, str]]:
+    """Recursively extract every credential-shaped leaf from a JSON
+    or YAML file.
+
+    No top-level container assumptions, no MCP-specific code paths.
+    The walker finds creds wherever they live in the tree and the
+    name synthesizer produces ``BRAVE_API_KEY`` from
+    ``plugins.entries.brave.config.webSearch.apiKey``.
     """
     out: list[tuple[str, str]] = []
+    try:
+        if path.stat().st_size > _MAX_CONFIG_FILE_SIZE:
+            return out
+    except OSError:
+        return out
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return out
 
-    if path.suffix == ".json":
-        try:
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".json":
             import json as _json
             data = _json.loads(text)
-        except (ValueError, OSError):
-            return out
-    else:
-        try:
+        else:
             data = yaml.safe_load(text)
-        except yaml.YAMLError:
-            return out
-
-    if not isinstance(data, dict):
+    except (ValueError, yaml.YAMLError):
         return out
 
-    # Top-level keys that look credential-shaped.
-    for k, v in data.items():
-        if isinstance(v, (str, int, float)) and _looks_credential(str(k)):
-            out.append((str(k), str(v)))
+    if not isinstance(data, (dict, list)):
+        return out
 
-    # Common credential containers (flat dict or list of KEY=VAL).
-    for container in _AGENT_CRED_KEYS:
-        section = data.get(container)
-        if isinstance(section, dict):
-            for k, v in section.items():
-                if v is None:
-                    continue
-                if isinstance(v, (str, int, float, bool)):
-                    out.append((str(k), str(v)))
-        elif isinstance(section, list):
-            for entry in section:
-                if isinstance(entry, str) and "=" in entry:
-                    k, v = entry.split("=", 1)
-                    out.append((k.strip(), v.strip()))
-                elif isinstance(entry, dict) and "name" in entry:
-                    val = entry.get("value")
-                    if val is not None:
-                        out.append((str(entry["name"]), str(val)))
-
-    # MCP / tool-server containers — each child has its own ``env`` /
-    # ``environment`` block. This is the convention used by Claude
-    # Desktop, OpenClaw, Cursor, Continue, Windsurf, etc.
-    for container in _AGENT_SERVER_KEYS:
-        servers = data.get(container)
-        if not isinstance(servers, dict):
-            continue
-        for server_def in servers.values():
-            if not isinstance(server_def, dict):
-                continue
-            env_block = server_def.get("env") or server_def.get("environment")
-            if isinstance(env_block, dict):
-                for k, v in env_block.items():
-                    if v is None:
-                        continue
-                    if isinstance(v, (str, int, float, bool)):
-                        out.append((str(k), str(v)))
-            elif isinstance(env_block, list):
-                for entry in env_block:
-                    if isinstance(entry, str) and "=" in entry:
-                        k, v = entry.split("=", 1)
-                        out.append((k.strip(), v.strip()))
+    file_stem = path.stem
+    for name, value in _walk_creds_in_obj(data, file_stem=file_stem):
+        out.append((name, value))
     return out
 
 
