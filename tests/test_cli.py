@@ -455,6 +455,164 @@ def test_publish_idempotent_no_changes(fake_machine, capsys):
     assert "no changes to commit" in out
 
 
+def test_doctor_clean(home, capsys):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+    rc = _invoke("doctor")
+    # exit 0 if no issues; on a clean test home there shouldn't be any
+    assert rc in (0, 1), capsys.readouterr().out
+
+
+def test_doctor_reports_missing_home(home, capsys, tmp_path, monkeypatch):
+    """If $SKILLSYNCER_HOME points at a missing dir, doctor should
+    surface it as an issue and exit non-zero."""
+    monkeypatch.setenv("SKILLSYNCER_HOME", str(tmp_path / "definitely-not-here"))
+    rc = _invoke("doctor")
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "does not exist" in out
+    assert "init" in out  # remediation hint
+
+
+def test_sources_list_empty(home, capsys):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+    rc = _invoke("sources", "list")
+    assert rc == 0
+    assert "No sources registered" in capsys.readouterr().out
+
+
+def test_sources_list_remove_show(home, capsys, tmp_path):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+    # Manually inject a source into config (avoids the git clone)
+    config = {
+        "sources": [{"name": "demo", "url": "git@example.com:me/demo.git",
+                     "path": str(tmp_path / "demo-repo")}],
+        "targets": [],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    rc = _invoke("sources", "list")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "demo" in out
+    assert "git@example.com:me/demo.git" in out
+
+    rc = _invoke("sources", "show", "demo")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "demo" in out
+
+    rc = _invoke("sources", "remove", "demo")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Removed source" in out
+
+    # Verify removal
+    after = yaml.safe_load((home / "config.yaml").read_text())
+    assert after["sources"] == []
+
+
+def test_sources_remove_unknown(home, capsys):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+    rc = _invoke("sources", "remove", "no-such")
+    assert rc == 2
+    assert "not found" in capsys.readouterr().err
+
+
+def test_hooks_install_uninstall_status(home, capsys, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+
+    capsys.readouterr()
+    rc = _invoke("hooks", "status", "--path", str(repo))
+    assert rc == 0
+    assert "not installed" in capsys.readouterr().out
+
+    rc = _invoke("hooks", "install", "--path", str(repo))
+    assert rc == 0
+    assert (repo / ".git" / "hooks" / "pre-push").exists()
+
+    capsys.readouterr()
+    rc = _invoke("hooks", "status", "--path", str(repo))
+    assert rc == 0
+    assert "installed" in capsys.readouterr().out
+
+    rc = _invoke("hooks", "uninstall", "--path", str(repo))
+    assert rc == 0
+    assert not (repo / ".git" / "hooks" / "pre-push").exists()
+
+
+def test_skill_show_existing(fake_machine, capsys):
+    capsys.readouterr()
+    rc = _invoke("skill", "show", "energy")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "energy" in out
+    assert "claude-code" in out
+    assert "managed" in out
+
+
+def test_skill_show_unknown(fake_machine, capsys):
+    rc = _invoke("skill", "show", "no-such-skill")
+    assert rc == 2
+    err = capsys.readouterr().err.lower()
+    assert "no skill" in err or "not found" in err
+
+
+def test_sync_no_sources(home, capsys):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+    rc = _invoke("sync")
+    assert rc == 2
+    assert "no sources" in capsys.readouterr().err.lower()
+
+
+def test_sync_pulls_source_then_renders(home, capsys, tmp_path):
+    _invoke("init", "--no-scan")
+    capsys.readouterr()
+
+    # Build a tiny upstream repo
+    upstream = tmp_path / "upstream.git"
+    upstream.mkdir()
+    subprocess.run(["git", "init", "--bare", "-q"], cwd=upstream, check=True)
+
+    # Build a working clone
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(work)], check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=work, check=True)
+    skill = work / "energy"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("URL=${{GATEWAY_URL}}", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=work, check=True)
+    subprocess.run(["git", "push", "-q"], cwd=work, check=True)
+
+    # Local source clone tracked by config
+    local = tmp_path / "local-source"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(local)], check=True)
+    target = tmp_path / "target"
+    target.mkdir()
+    config = {
+        "sources": [{"name": "demo", "url": str(upstream), "path": str(local)}],
+        "targets": [{"name": "agent", "path": str(target)}],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    _invoke("secret-set", "GATEWAY_URL", "https://x")
+    capsys.readouterr()
+
+    rc = _invoke("sync")
+    assert rc == 0
+    rendered = (target / "energy" / "SKILL.md").read_text(encoding="utf-8")
+    assert rendered == "URL=https://x"
+
+
 def test_report_lifecycle(home, capsys):
     _invoke("init")
     capsys.readouterr()

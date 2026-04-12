@@ -532,22 +532,60 @@ walkthrough. No Slack thread.
 
 ## CLI cheat sheet
 
+**Setup & sync**
+
 ```
 skillsyncer init                          # one-time setup; scans environment
 skillsyncer init --json                   # discovery proposal as JSON (for agents)
+skillsyncer init --yes                    # skip the credential-scan consent prompt
+skillsyncer init --no-scan                # skip credential scanning entirely
 
-skillsyncer add <git-url> [--name=NAME]   # register a skills source + install hooks
-skillsyncer publish [--all] [--skill X]   # cherry-pick local skills into a source repo
-skillsyncer render                        # hydrate ${{}} placeholders into agent dirs
-skillsyncer fill --auto                   # resolve from env / cascade / defaults
+skillsyncer add <git-url> [--name=NAME]   # clone, install hooks, register a source
+skillsyncer sync                          # git pull every source, then render
+skillsyncer doctor                        # diagnose hooks, sources, missing tools
+```
+
+**Skills**
+
+```
+skillsyncer skills [--agent NAME] [--json]   # list every local skill
+skillsyncer skill show <name>                # placeholders, status, hardcoded secrets
+skillsyncer publish [--all] [--skill NAME]   # cherry-pick into a source repo
+skillsyncer render                            # hydrate ${{}} into agent dirs
+skillsyncer fill --auto                       # resolve from env / cascade / defaults
+skillsyncer diff-since-last-sync              # skills that changed since last render
+```
+
+**Sources & hooks**
+
+```
+skillsyncer sources list                  # registered source repos
+skillsyncer sources show <name>           # url, path, skills inside
+skillsyncer sources remove <name>         # unregister (does NOT delete the clone)
+
+skillsyncer hooks install [--path DIR]    # install pre-push + post-merge into a repo
+skillsyncer hooks uninstall [--path DIR]  # remove the SkillSyncer block
+skillsyncer hooks status [--path DIR]     # show what's installed
+```
+
+**Security**
+
+```
 skillsyncer scan [--staged] [--format=json] [--path=DIR]
-skillsyncer guard --fix                   # scan staged files and auto-fix
-skillsyncer diff-since-last-sync          # skills that changed since last render
+skillsyncer guard [--fix]                 # scan staged files and auto-fix
+```
 
+**Secrets**
+
+```
 skillsyncer secret-set KEY VALUE          # add or update an identity secret
 skillsyncer secret-list                   # show key names (never values)
 skillsyncer status                        # what you have, what's missing
+```
 
+**Reports**
+
+```
 skillsyncer report latest [--type=fill|guard]
 skillsyncer report list
 skillsyncer report clean [--days=30]

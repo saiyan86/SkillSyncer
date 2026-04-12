@@ -1004,6 +1004,321 @@ def cmd_guard(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# sync — git pull every source, then render
+# ---------------------------------------------------------------------------
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    config = read_config()
+    sources = config.get("sources") or []
+    if not sources:
+        _err("[skillsyncer] no sources registered. Run `skillsyncer add <git-url>` first.")
+        return 2
+
+    _out("")
+    _out(_section("Pulling sources") + C.dim(f"  ({len(sources)})"))
+    pulled: list[str] = []
+    failed: list[tuple[str, str]] = []
+    for source in sources:
+        name = source.get("name", "?")
+        path = source.get("path") or ""
+        repo = Path(path).expanduser()
+        if not repo.is_dir():
+            failed.append((name, "path missing"))
+            _out(f"  {C.red(GLYPH_CROSS)} {C.bold(name):<20} {C.red('path missing')}")
+            continue
+        if not (repo / ".git").exists():
+            failed.append((name, "not a git repo"))
+            _out(f"  {C.red(GLYPH_CROSS)} {C.bold(name):<20} {C.red('not a git repo')}")
+            continue
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "pull", "--ff-only"],
+                capture_output=True, text=True, check=True,
+            )
+            summary = proc.stdout.strip().splitlines()
+            tail = summary[-1] if summary else "up to date"
+            pulled.append(name)
+            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(name):<20} {C.dim(tail)}")
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            err = getattr(exc, "stderr", "").strip() or str(exc)
+            failed.append((name, err))
+            _out(f"  {C.red(GLYPH_CROSS)} {C.bold(name):<20} {C.red(err[:60])}")
+
+    _out("")
+    if not pulled:
+        _err("[skillsyncer] nothing pulled.")
+        return 1
+
+    # Hand off to render
+    render_args = argparse.Namespace(report_path=None)
+    rc = cmd_render(render_args)
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# doctor — diagnose state and common problems
+# ---------------------------------------------------------------------------
+
+
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    successes: list[str] = []
+    issues: list[str] = []
+
+    # Toolchain
+    try:
+        proc = subprocess.run(["git", "--version"], capture_output=True, text=True, check=True)
+        successes.append(f"git: {proc.stdout.strip()}")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        issues.append("git is not on PATH — required for sources and hooks")
+
+    try:
+        import yaml as _yaml
+        successes.append(f"pyyaml: {_yaml.__version__}")
+    except ImportError:
+        issues.append("pyyaml is not installed (the install script should have done this)")
+
+    # Home + state files
+    home = paths.home()
+    if home.exists():
+        successes.append(f"home: {home}")
+    else:
+        issues.append(f"home: {home} does not exist — run `skillsyncer init`")
+        # No point continuing the per-file checks
+        _print_doctor(successes, issues)
+        return 1
+
+    if paths.identity_path().exists():
+        n_secrets = len(read_identity().get("secrets") or {})
+        successes.append(f"identity.yaml: {n_secrets} secret(s) stored")
+    else:
+        issues.append("identity.yaml missing — run `skillsyncer init`")
+
+    config = read_config()
+    if paths.config_path().exists():
+        n_sources = len(config.get("sources") or [])
+        n_targets = len(config.get("targets") or [])
+        successes.append(f"config.yaml: {n_sources} source(s), {n_targets} target(s)")
+    else:
+        issues.append("config.yaml missing — run `skillsyncer init`")
+
+    state = read_state()
+    n_state_skills = len(state.get("skills") or {})
+    successes.append(f"state.yaml: {n_state_skills} skill(s) tracked")
+
+    # Sources
+    from .hooks import hook_is_installed
+    for source in config.get("sources") or []:
+        name = source.get("name", "?")
+        path = source.get("path")
+        if not path:
+            issues.append(f"source '{name}': no path recorded")
+            continue
+        repo = Path(path).expanduser()
+        if not repo.is_dir():
+            issues.append(f"source '{name}': path doesn't exist ({repo})")
+            continue
+        if not (repo / ".git").exists():
+            issues.append(f"source '{name}': not a git repo ({repo})")
+            continue
+        if not hook_is_installed(repo, "pre-push"):
+            issues.append(
+                f"source '{name}': pre-push hook missing — "
+                f"run `skillsyncer hooks install --path {repo}`"
+            )
+        else:
+            successes.append(f"source '{name}': hooks installed")
+
+    # Targets
+    for target in config.get("targets") or []:
+        name = target.get("name", "?")
+        path = target.get("path")
+        if not path:
+            continue
+        target_dir = Path(path).expanduser()
+        if target_dir.exists():
+            successes.append(f"target '{name}': {target_dir}")
+        else:
+            issues.append(f"target '{name}': path doesn't exist ({target_dir})")
+
+    # Local skills
+    local_skills = _find_local_skills()
+    successes.append(f"local skills: {len(local_skills)} discovered")
+
+    _print_doctor(successes, issues)
+    return 0 if not issues else 1
+
+
+def _print_doctor(successes: list[str], issues: list[str]) -> None:
+    _out("")
+    _out(_section("SkillSyncer doctor") + C.dim(f"  ({len(successes)} ok, {len(issues)} issue(s))"))
+    _out("")
+    for s in successes:
+        _out(f"  {C.green(GLYPH_CHECK)} {s}")
+    for i in issues:
+        _out(f"  {C.red(GLYPH_CROSS)} {i}")
+    _out("")
+    if not issues:
+        _out(_ok(C.bold("Everything looks good.")))
+    else:
+        _out(_warn(C.bold(f"{len(issues)} issue(s) need attention.")))
+    _out("")
+
+
+# ---------------------------------------------------------------------------
+# sources / hooks groups
+# ---------------------------------------------------------------------------
+
+
+def cmd_sources_list(_args: argparse.Namespace) -> int:
+    config = read_config()
+    sources = config.get("sources") or []
+    if not sources:
+        _out(C.dim("No sources registered."))
+        return 0
+    _out("")
+    _out(_section("Sources") + C.dim(f"  ({len(sources)})"))
+    for s in sources:
+        name = s.get("name", "?")
+        url = s.get("url", "?")
+        path = s.get("path", "?")
+        _out(f"  {C.bold(name)}")
+        _out(f"    {C.dim('url:')}  {url}")
+        _out(f"    {C.dim('path:')} {path}")
+    return 0
+
+
+def cmd_sources_remove(args: argparse.Namespace) -> int:
+    config = read_config()
+    sources = config.get("sources") or []
+    match = next((s for s in sources if s.get("name") == args.name), None)
+    if match is None:
+        _err(f"[skillsyncer] source '{args.name}' not found.")
+        return 2
+    config["sources"] = [s for s in sources if s.get("name") != args.name]
+    write_config(config)
+    _out(_ok(f"Removed source {C.bold(args.name)}"))
+    repo_path = match.get("path")
+    if repo_path and Path(repo_path).exists():
+        _out("")
+        _out(C.dim(f"The cloned repo at {repo_path} was NOT deleted."))
+        _out(C.dim(f"Remove it manually with: rm -rf {repo_path}"))
+    return 0
+
+
+def cmd_sources_show(args: argparse.Namespace) -> int:
+    config = read_config()
+    sources = config.get("sources") or []
+    match = next((s for s in sources if s.get("name") == args.name), None)
+    if match is None:
+        _err(f"[skillsyncer] source '{args.name}' not found.")
+        return 2
+    _out("")
+    _out(_section(f"Source: {match.get('name')}"))
+    for k, v in match.items():
+        _out(f"  {C.dim(k + ':'):<10} {v}")
+
+    repo = Path(match.get("path") or "").expanduser()
+    if repo.is_dir():
+        _out("")
+        _out(_section("Skills in this source"))
+        skill_count = 0
+        for child in sorted(repo.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            md = child / "SKILL.md"
+            if md.is_file():
+                skill_count += 1
+                _out(f"  {GLYPH_BULLET} {child.name}")
+        if not skill_count:
+            _out(C.dim("  (no skills)"))
+    return 0
+
+
+def cmd_hooks_install(args: argparse.Namespace) -> int:
+    repo = Path(args.path).resolve()
+    try:
+        written = hooks.install_hooks(repo)
+    except FileNotFoundError as exc:
+        _err(f"[skillsyncer] {exc}")
+        return 2
+    _out(_ok(f"Installed {len(written)} hook(s) into {repo}"))
+    for w in written:
+        _out(f"  {C.green(GLYPH_CHECK)} {w.name}")
+    return 0
+
+
+def cmd_hooks_uninstall(args: argparse.Namespace) -> int:
+    repo = Path(args.path).resolve()
+    touched = hooks.uninstall_hooks(repo)
+    if not touched:
+        _out(C.dim("No SkillSyncer hooks were installed in this repo."))
+        return 0
+    _out(_ok(f"Removed SkillSyncer block from {len(touched)} hook(s)"))
+    for t in touched:
+        _out(f"  {C.green(GLYPH_CHECK)} {t.name}")
+    return 0
+
+
+def cmd_hooks_status(args: argparse.Namespace) -> int:
+    repo = Path(args.path).resolve()
+    _out("")
+    _out(_section(f"Hook status: {repo}"))
+    for name in ("pre-push", "post-merge"):
+        if hooks.hook_is_installed(repo, name):
+            _out(f"  {C.green(GLYPH_CHECK)} {name:<12} installed")
+        else:
+            _out(f"  {C.dim(GLYPH_BULLET)} {name:<12} {C.dim('not installed')}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# skill (singular) — inspect a specific skill
+# ---------------------------------------------------------------------------
+
+
+def cmd_skill_show(args: argparse.Namespace) -> int:
+    matches = [s for s in _find_local_skills() if s["name"] == args.name]
+    if not matches:
+        _err(f"[skillsyncer] no skill named '{args.name}' found in any agent dir.")
+        return 2
+
+    import re as _re
+    placeholder_re = _re.compile(r"\$\{\{([A-Z_][A-Z0-9_]*)\}\}")
+    identity = read_identity()
+    secrets = identity.get("secrets") or {}
+
+    for skill in matches:
+        md = skill["md"]
+        try:
+            content = md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            content = ""
+
+        placeholders = sorted(set(placeholder_re.findall(content)))
+        from .scanner import scan_content
+        detections = scan_content(content, secrets)
+
+        _out("")
+        _out(_section(f"Skill: {skill['name']}"))
+        _out(f"  {C.dim('agent:'):<14} {skill['agent']}")
+        _out(f"  {C.dim('path:'):<14} {md}")
+        _out(f"  {C.dim('size:'):<14} {len(content)} bytes")
+        _out(f"  {C.dim('placeholders:'):<14} {len(placeholders)}")
+        for p in placeholders:
+            mark = C.green(GLYPH_CHECK) if p in secrets else C.yellow("!")
+            status = "filled" if p in secrets else "missing"
+            _out(f"      {mark} {p:<24} {C.dim(status)}")
+        if detections:
+            _out(f"  {C.red('hardcoded secrets:')} {len(detections)}")
+            for d in detections:
+                _out(f"      {C.red(GLYPH_CROSS)} line {d['line']}: {d['pattern_label']}")
+        managed = "skillsyncer:require" in content
+        _out(f"  {C.dim('managed:'):<14} " + (C.green("yes") if managed else C.yellow("no")))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # diff / status / secrets
 # ---------------------------------------------------------------------------
 
@@ -1172,6 +1487,56 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true",
                    help="Print as JSON instead of the formatted listing.")
     p.set_defaults(func=cmd_skills)
+
+    # skill (singular) — inspect a specific skill
+    p_skill = sub.add_parser("skill", help="Inspect a single skill by name.")
+    skill_sub = p_skill.add_subparsers(dest="skill_command", metavar="SKILL_COMMAND")
+    skill_sub.required = True
+
+    sp = skill_sub.add_parser("show", help="Show metadata, placeholders, and any hardcoded secrets for a skill.")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_skill_show)
+
+    # sync — pull every source then render
+    p = sub.add_parser("sync", help="Git pull every source repo, then render all skills.")
+    p.set_defaults(func=cmd_sync)
+
+    # doctor — diagnostics
+    p = sub.add_parser("doctor", help="Diagnose SkillSyncer state, hooks, missing tools.")
+    p.set_defaults(func=cmd_doctor)
+
+    # sources group
+    p_sources = sub.add_parser("sources", help="Manage registered skill source repos.")
+    sources_sub = p_sources.add_subparsers(dest="sources_command", metavar="SOURCES_COMMAND")
+    sources_sub.required = True
+
+    sp = sources_sub.add_parser("list", help="List registered sources.")
+    sp.set_defaults(func=cmd_sources_list)
+
+    sp = sources_sub.add_parser("show", help="Show details about one source.")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_sources_show)
+
+    sp = sources_sub.add_parser("remove", help="Remove a source from config.yaml (does not delete the cloned repo).")
+    sp.add_argument("name")
+    sp.set_defaults(func=cmd_sources_remove)
+
+    # hooks group
+    p_hooks = sub.add_parser("hooks", help="Install / uninstall / inspect git hooks in a repo.")
+    hooks_sub = p_hooks.add_subparsers(dest="hooks_command", metavar="HOOKS_COMMAND")
+    hooks_sub.required = True
+
+    sp = hooks_sub.add_parser("install", help="Install pre-push and post-merge hooks into a git repo.")
+    sp.add_argument("--path", default=".", help="Path to the git repo (default: cwd).")
+    sp.set_defaults(func=cmd_hooks_install)
+
+    sp = hooks_sub.add_parser("uninstall", help="Remove the SkillSyncer block from hooks (leaves anything else intact).")
+    sp.add_argument("--path", default=".", help="Path to the git repo (default: cwd).")
+    sp.set_defaults(func=cmd_hooks_uninstall)
+
+    sp = hooks_sub.add_parser("status", help="Check whether hooks are installed in a repo.")
+    sp.add_argument("--path", default=".", help="Path to the git repo (default: cwd).")
+    sp.set_defaults(func=cmd_hooks_status)
 
     # fill
     p = sub.add_parser("fill", help="Resolve unfilled placeholders from env / identity / cascade.")
