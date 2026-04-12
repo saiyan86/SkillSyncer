@@ -376,13 +376,25 @@ _CRED_FILE_NAMES = {
 }
 
 # Subdirectory names that are noise — skip them when walking.
+# Mostly Electron / Chromium / VS Code caches that can contain
+# tens of thousands of files we never want to read.
 _WALK_SKIP_DIRS = {
+    # Build / language / dep junk
     "node_modules", "venv", ".venv", "__pycache__", ".git",
-    "dist", "build", ".cache", "logs", "Cache", "GPUCache",
-    "Code Cache", "blob_storage", "tmp", "temp",
+    "dist", "build", "target", "out", ".idea", ".vscode",
+    # Logs / temp
+    "logs", "tmp", "temp",
+    # Generic caches
+    ".cache", "Cache", "Cache_Data",
+    # Electron / Chromium internals
+    "GPUCache", "Code Cache", "Code Cache Js", "Code Cache Wasm",
+    "blob_storage", "Crashpad", "Crash Reports", "DawnCache",
+    "ShaderCache", "GrShaderCache", "VideoDecodeStats",
+    "Service Worker", "IndexedDB", "Local Storage",
+    "Session Storage", "WebStorage", "WebRTC Logs",
+    # VS Code workspace state
+    "workspaceStorage", "globalStorage", "History",
 }
-
-_MAX_WALK_DEPTH = 3
 
 _AGENT_CRED_KEYS = ("secrets", "credentials", "env", "environment", "api_keys", "keys")
 
@@ -429,35 +441,33 @@ def _scan_tool_dir(tool_dir: Path, home: Path):
 
 def _walk_for_cred_files(root: Path):
     """Yield ``Path`` objects for files matching ``_is_cred_filename``,
-    walking ``root`` to a maximum depth and skipping noise dirs.
+    walking ``root`` exhaustively.
 
-    Hidden subdirectories are skipped *below* the root (the root
-    itself is allowed to be hidden — that's how we get into
-    ``~/.openclaw`` in the first place).
+    Safety nets that make unbounded depth safe in practice:
+
+    - ``os.walk(..., followlinks=False)`` so symlink loops can't hang
+      the scan and we never wander out of the root via a stray link.
+    - ``_WALK_SKIP_DIRS`` is pruned in-place from ``dirnames`` so we
+      never descend into ``node_modules``, Chromium caches, etc.
+    - Hidden subdirectories *below* the root are skipped. The root
+      itself is allowed to be hidden — that's how we got into
+      ``~/.openclaw`` in the first place.
+    - The filename allowlist is the real filter: even if we walk
+      10k directories, we only ever read a handful of files.
     """
-    def _walk(d: Path, depth: int):
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            if entry.name in _WALK_SKIP_DIRS:
-                continue
-            try:
-                is_dir = entry.is_dir()
-            except OSError:
-                continue
-            if is_dir:
-                if depth >= _MAX_WALK_DEPTH:
-                    continue
-                if entry.name.startswith(".") and depth > 0:
-                    continue
-                yield from _walk(entry, depth + 1)
-                continue
-            if _is_cred_filename(entry.name):
-                yield entry
-
-    yield from _walk(root, 0)
+    if not _is_dir_safe(root):
+        return
+    root_str = str(root)
+    for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
+        is_root_level = Path(dirpath) == root
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _WALK_SKIP_DIRS
+            and (is_root_level or not d.startswith("."))
+        ]
+        for fname in filenames:
+            if _is_cred_filename(fname):
+                yield Path(dirpath) / fname
 
 
 def _is_dir_safe(p: Path) -> bool:

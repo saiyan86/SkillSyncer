@@ -240,15 +240,35 @@ def test_mcp_servers_env_block_in_yaml(tmp_path):
     assert "BRAVE_API_KEY" in keys
 
 
-def test_walker_descends_three_levels(tmp_path):
-    """Per-agent profile dirs nested 2-3 levels deep are still scanned."""
+def test_walker_descends_arbitrary_depth(tmp_path):
+    """No depth cap — find the cred file no matter how deep it lives.
+
+    The filename allowlist + skip-dirs set is the real filter.
+    """
     home = tmp_path / "home"
-    deep = home / ".openclaw" / "agents" / "research" / "tools"
+    deep = home / ".openclaw" / "agents" / "research" / "tools" / "alpha" / "v1" / "config"
     deep.mkdir(parents=True)
     (deep / ".env").write_text("RESEARCH_API_KEY=rsa-deep-1234567890\n")
     result = discover(home=home, cwd=tmp_path, env={})
     keys = {c["key"] for c in result["credentials"]}
     assert "RESEARCH_API_KEY" in keys
+
+
+def test_walker_safe_against_symlink_loops(tmp_path):
+    """A symlink that points back at an ancestor must not hang the scan."""
+    home = tmp_path / "home"
+    deep = home / ".openclaw" / "real"
+    deep.mkdir(parents=True)
+    (deep / ".env").write_text("REAL_KEY=actual-value\n")
+    loop = home / ".openclaw" / "loop"
+    try:
+        loop.symlink_to(home / ".openclaw")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this filesystem")
+    # If the walker followed symlinks this would never return.
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "REAL_KEY" in keys
 
 
 def test_walker_skips_noise_dirs(tmp_path):
