@@ -26,16 +26,22 @@ case ":$PATH:" in
     ;;
 esac
 
-if command -v pipx >/dev/null 2>&1; then
-  pipx install skillsyncer
-elif command -v pip >/dev/null 2>&1; then
-  pip install --user skillsyncer 2>/dev/null \
-    || pip install --user --break-system-packages skillsyncer
+# SkillSyncer is not yet on PyPI — install directly from GitHub.
+# Override with: SKILLSYNCER_SOURCE=skillsyncer ./install.sh   (once published)
+SOURCE="${SKILLSYNCER_SOURCE:-git+https://github.com/saiyan86/SkillSyncer.git}"
+
+if command -v uv >/dev/null 2>&1; then
+  uv tool install --force "$SOURCE"
+elif command -v pipx >/dev/null 2>&1; then
+  pipx install --force "$SOURCE"
 elif command -v pip3 >/dev/null 2>&1; then
-  pip3 install --user skillsyncer 2>/dev/null \
-    || pip3 install --user --break-system-packages skillsyncer
+  pip3 install --user "$SOURCE" 2>/dev/null \
+    || pip3 install --user --break-system-packages "$SOURCE"
+elif command -v pip >/dev/null 2>&1; then
+  pip install --user "$SOURCE" 2>/dev/null \
+    || pip install --user --break-system-packages "$SOURCE"
 else
-  echo "ERROR: no pip / pipx found. Install Python first." >&2
+  echo "ERROR: no uv / pipx / pip found. Install Python first." >&2
   exit 1
 fi
 

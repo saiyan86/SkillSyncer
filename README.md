@@ -3,7 +3,7 @@
 **Agent skills that sync, fill, and protect themselves.**
 
 ```
-curl -fsSL https://skillsyncer.dev/install | sh && skillsyncer init
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh && skillsyncer init
 ```
 
 > Drop a skill into a teammate's project. Their agent installs
@@ -43,7 +43,7 @@ leak on push.
 ### Install
 
 ```bash
-curl -fsSL https://skillsyncer.dev/install | sh
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
 skillsyncer init
 ```
 
@@ -69,7 +69,7 @@ SkillSyncer operator skill installed:
 You:    (pulls a project repo with .claude/skills/energy-diagnose/)
 Agent:  reads SKILL.md, sees the <!-- skillsyncer:require --> preamble
         SkillSyncer is not installed
-Agent:  curl -fsSL https://skillsyncer.dev/install | sh
+Agent:  curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
         skillsyncer init --json
 Agent:  "I just set up SkillSyncer. I scanned your machine and found:
 
@@ -194,7 +194,7 @@ the top:
 ```markdown
 <!-- skillsyncer:require -->
 <!-- If SkillSyncer is not installed, run: -->
-<!--   curl -fsSL https://skillsyncer.dev/install | sh -->
+<!--   curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh -->
 <!-- Then run: skillsyncer render -->
 <!-- skillsyncer:end -->
 
@@ -219,7 +219,7 @@ adopts them.
 
 ```bash
 # 1. Install
-curl -fsSL https://skillsyncer.dev/install | sh
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
 
 # 2. Set up — scans your machine, asks one question
 skillsyncer init
@@ -256,7 +256,7 @@ repo. Use OS keychain or disk encryption if you want belt + suspenders.
 ### Solo dev, new laptop
 
 ```
-$ curl -fsSL https://skillsyncer.dev/install | sh
+$ curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
 $ skillsyncer init
 ✓ SkillSyncer initialized at /Users/me/.skillsyncer
 
@@ -556,7 +556,8 @@ skillsyncer/
 **v0.1** — phase-complete and tested. All 95 unit + end-to-end tests
 pass. The CLI, hooks, scanner, renderer, filler, guarder, reporter,
 state, identity, config, discoverer, and operator skill are all in
-place. The published `skillsyncer.dev/install` URL ships next.
+place. PyPI release + a friendly `skillsyncer.dev/install` redirect
+ship next.
 
 If you want to try it from source today:
 
