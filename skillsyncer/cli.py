@@ -715,7 +715,16 @@ def _write_reference_stub(
     upstream: str,
 ) -> None:
     """Write a SKILL.md stub that points teammates' agents at the
-    upstream repo instead of vendoring the skill tree."""
+    upstream repo instead of vendoring the skill tree.
+
+    If the destination already contains files from a prior vendored
+    publish, wipe them first — otherwise the stub coexists with the
+    old tree and the source repo ends up with both.
+    """
+    import shutil
+
+    if dst_dir.exists():
+        shutil.rmtree(dst_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     md = dst_dir / "SKILL.md"
     body = (
