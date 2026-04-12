@@ -358,7 +358,9 @@ _AI_TOOL_HOME_DIRS = [
 ]
 
 # Filenames inside any AI tool dir we'll parse for credentials.
-_CRED_FILE_NAMES = [
+# Includes MCP-server config conventions used by Claude Desktop,
+# Cursor, OpenClaw, Continue.dev, etc.
+_CRED_FILE_NAMES = {
     ".env", ".env.local", ".env.production",
     "config.env", "auth.env",
     "credentials", "credentials.json",
@@ -366,9 +368,35 @@ _CRED_FILE_NAMES = [
     "secrets.json", "secrets.yaml", "secrets.yml",
     "config.json", "config.yaml", "config.yml",
     "settings.json", "auth.json", ".auth",
-]
+    # MCP / tool server configs
+    "mcp.json", "mcp_servers.json", "mcp-servers.json",
+    "claude_desktop_config.json",
+    "servers.json", "tools.json", "extensions.json",
+    "agent.yaml", "agent.yml", "agent.json",
+}
+
+# Subdirectory names that are noise — skip them when walking.
+_WALK_SKIP_DIRS = {
+    "node_modules", "venv", ".venv", "__pycache__", ".git",
+    "dist", "build", ".cache", "logs", "Cache", "GPUCache",
+    "Code Cache", "blob_storage", "tmp", "temp",
+}
+
+_MAX_WALK_DEPTH = 3
 
 _AGENT_CRED_KEYS = ("secrets", "credentials", "env", "environment", "api_keys", "keys")
+
+# Containers whose entries each have a nested env block. This is the
+# MCP / tool-server convention shared by Claude Desktop, OpenClaw,
+# Cursor, Continue, Windsurf, etc.
+_AGENT_SERVER_KEYS = ("mcpServers", "mcp_servers", "servers", "tools", "extensions")
+
+
+def _is_cred_filename(name: str) -> bool:
+    if name in _CRED_FILE_NAMES:
+        return True
+    lower = name.lower()
+    return lower.endswith(".env") or lower.endswith(".env.local")
 
 
 def _ai_tool_dirs(home: Path) -> list[Path]:
@@ -376,39 +404,60 @@ def _ai_tool_dirs(home: Path) -> list[Path]:
 
 
 def _scan_tool_dir(tool_dir: Path, home: Path):
-    """Yield credentials from any known cred file in ``tool_dir`` or
-    its immediate subdirs (e.g. ``profiles/default/credentials``)."""
+    """Walk ``tool_dir`` (depth ≤ 3) and yield credentials from any
+    known cred file. Bounded depth + filename allowlist + noise-dir
+    skip keep this fast even on tools with deep cache trees."""
     if not _is_dir_safe(tool_dir):
         return
-    candidates: list[Path] = [tool_dir]
-    try:
-        for child in tool_dir.iterdir():
-            if child.is_dir() and not child.name.startswith("."):
-                candidates.append(child)
-    except OSError:
-        pass
 
-    for cand in candidates:
-        for fname in _CRED_FILE_NAMES:
-            path = cand / fname
-            if not _is_user_file(path):
+    for path in _walk_for_cred_files(tool_dir):
+        try:
+            display = str(path.relative_to(home))
+        except ValueError:
+            display = path.name
+
+        lower = path.name.lower()
+        if lower.endswith(".json") or lower.endswith((".yaml", ".yml")):
+            pairs = _parse_agent_config(path)
+        else:
+            # .env, .env.local, credentials, settings, auth — line-based
+            pairs = _parse_env_file(path)
+
+        for k, v in pairs:
+            yield k, v, display, str(path)
+
+
+def _walk_for_cred_files(root: Path):
+    """Yield ``Path`` objects for files matching ``_is_cred_filename``,
+    walking ``root`` to a maximum depth and skipping noise dirs.
+
+    Hidden subdirectories are skipped *below* the root (the root
+    itself is allowed to be hidden — that's how we get into
+    ``~/.openclaw`` in the first place).
+    """
+    def _walk(d: Path, depth: int):
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name in _WALK_SKIP_DIRS:
                 continue
             try:
-                display = str(path.relative_to(home))
-            except ValueError:
-                display = path.name
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                if depth >= _MAX_WALK_DEPTH:
+                    continue
+                if entry.name.startswith(".") and depth > 0:
+                    continue
+                yield from _walk(entry, depth + 1)
+                continue
+            if _is_cred_filename(entry.name):
+                yield entry
 
-            lower = path.name.lower()
-            if lower.endswith((".json",)):
-                pairs = _parse_agent_config(path)
-            elif lower.endswith((".yaml", ".yml")):
-                pairs = _parse_agent_config(path)
-            else:
-                # .env, credentials, settings, auth — line-based
-                pairs = _parse_env_file(path)
-
-            for k, v in pairs:
-                yield k, v, display, str(path)
+    yield from _walk(root, 0)
 
 
 def _is_dir_safe(p: Path) -> bool:
@@ -452,7 +501,7 @@ def _parse_agent_config(path: Path) -> list[tuple[str, str]]:
         if isinstance(v, (str, int, float)) and _looks_credential(str(k)):
             out.append((str(k), str(v)))
 
-    # Common credential containers.
+    # Common credential containers (flat dict or list of KEY=VAL).
     for container in _AGENT_CRED_KEYS:
         section = data.get(container)
         if isinstance(section, dict):
@@ -470,6 +519,29 @@ def _parse_agent_config(path: Path) -> list[tuple[str, str]]:
                     val = entry.get("value")
                     if val is not None:
                         out.append((str(entry["name"]), str(val)))
+
+    # MCP / tool-server containers — each child has its own ``env`` /
+    # ``environment`` block. This is the convention used by Claude
+    # Desktop, OpenClaw, Cursor, Continue, Windsurf, etc.
+    for container in _AGENT_SERVER_KEYS:
+        servers = data.get(container)
+        if not isinstance(servers, dict):
+            continue
+        for server_def in servers.values():
+            if not isinstance(server_def, dict):
+                continue
+            env_block = server_def.get("env") or server_def.get("environment")
+            if isinstance(env_block, dict):
+                for k, v in env_block.items():
+                    if v is None:
+                        continue
+                    if isinstance(v, (str, int, float, bool)):
+                        out.append((str(k), str(v)))
+            elif isinstance(env_block, list):
+                for entry in env_block:
+                    if isinstance(entry, str) and "=" in entry:
+                        k, v = entry.split("=", 1)
+                        out.append((k.strip(), v.strip()))
     return out
 
 

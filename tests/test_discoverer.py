@@ -193,6 +193,85 @@ def test_discover_skips_creds_when_scan_disabled(tmp_path):
     assert any("env" in d for d in paths)
 
 
+def test_mcp_servers_env_block_extracted_from_json(tmp_path):
+    """Claude Desktop / OpenClaw / Cursor / Continue all use this shape."""
+    home = tmp_path / "home"
+    openclaw = home / ".openclaw"
+    openclaw.mkdir(parents=True)
+    (openclaw / "mcp.json").write_text("""
+{
+  "mcpServers": {
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "BSAFAKEFAKEFAKEFAKEFAKEFAKE"
+      }
+    },
+    "google-places": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-google-places"],
+      "env": {
+        "GOOGLE_PLACES_API_KEY": "AIzaFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE"
+      }
+    }
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "BRAVE_API_KEY" in keys
+    assert "GOOGLE_PLACES_API_KEY" in keys
+
+
+def test_mcp_servers_env_block_in_yaml(tmp_path):
+    home = tmp_path / "home"
+    cursor = home / ".cursor"
+    cursor.mkdir(parents=True)
+    (cursor / "mcp_servers.json").write_text("""
+{
+  "servers": {
+    "brave": {"env": {"BRAVE_API_KEY": "bsa-xxx"}}
+  }
+}
+""")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "BRAVE_API_KEY" in keys
+
+
+def test_walker_descends_three_levels(tmp_path):
+    """Per-agent profile dirs nested 2-3 levels deep are still scanned."""
+    home = tmp_path / "home"
+    deep = home / ".openclaw" / "agents" / "research" / "tools"
+    deep.mkdir(parents=True)
+    (deep / ".env").write_text("RESEARCH_API_KEY=rsa-deep-1234567890\n")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "RESEARCH_API_KEY" in keys
+
+
+def test_walker_skips_noise_dirs(tmp_path):
+    """node_modules and friends must not get walked."""
+    home = tmp_path / "home"
+    noisy = home / ".openclaw" / "node_modules" / "deep"
+    noisy.mkdir(parents=True)
+    (noisy / ".env").write_text("LEAKED=should-not-appear\n")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "LEAKED" not in keys
+
+
+def test_walker_skips_hidden_subdirs_under_root(tmp_path):
+    home = tmp_path / "home"
+    cache = home / ".openclaw" / ".cache" / "deep"
+    cache.mkdir(parents=True)
+    (cache / ".env").write_text("HIDDEN_KEY=should-not-appear\n")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "HIDDEN_KEY" not in keys
+
+
 def test_credential_scan_plan_includes_ai_tool_dirs(tmp_path):
     home = tmp_path / "home"
     (home / ".openclaw").mkdir(parents=True)
