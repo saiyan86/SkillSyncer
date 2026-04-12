@@ -51,12 +51,118 @@ _TEXT_EXTENSIONS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Color + visual helpers
+# ---------------------------------------------------------------------------
+
+
+class C:
+    """ANSI color helpers. Outputs escape codes only when stdout is a
+    TTY and the user hasn't set ``NO_COLOR``. ``FORCE_COLOR`` overrides.
+    Tests use capsys, which is non-tty, so colors auto-disable."""
+
+    enabled = False
+
+    @classmethod
+    def init(cls) -> None:
+        if os.environ.get("NO_COLOR"):
+            cls.enabled = False
+        elif os.environ.get("FORCE_COLOR"):
+            cls.enabled = True
+        else:
+            cls.enabled = sys.stdout.isatty()
+
+    @classmethod
+    def _wrap(cls, code: str, text: str) -> str:
+        return f"\x1b[{code}m{text}\x1b[0m" if cls.enabled else text
+
+    @classmethod
+    def bold(cls, t: str) -> str: return cls._wrap("1", t)
+    @classmethod
+    def dim(cls, t: str) -> str: return cls._wrap("2", t)
+    @classmethod
+    def red(cls, t: str) -> str: return cls._wrap("31", t)
+    @classmethod
+    def green(cls, t: str) -> str: return cls._wrap("32", t)
+    @classmethod
+    def yellow(cls, t: str) -> str: return cls._wrap("33", t)
+    @classmethod
+    def blue(cls, t: str) -> str: return cls._wrap("34", t)
+    @classmethod
+    def magenta(cls, t: str) -> str: return cls._wrap("35", t)
+    @classmethod
+    def cyan(cls, t: str) -> str: return cls._wrap("36", t)
+
+
 def _out(msg: str = "") -> None:
     print(msg)
 
 
 def _err(msg: str = "") -> None:
     print(msg, file=sys.stderr)
+
+
+# Box-drawing + status glyphs as named constants. Pulled out so we
+# can interpolate them inside f-strings without tripping Python 3.11's
+# "no backslashes inside f-string expressions" rule.
+GLYPH_CHECK = "\u2713"      # ✓
+GLYPH_CROSS = "\u2717"      # ✗
+GLYPH_BULLET = "\u00b7"     # ·
+GLYPH_ARROW = "\u2192"      # →
+GLYPH_ELLIP = "\u2026"      # …
+BOX_HEAVY = "\u2500" * 60   # ─ × 60
+BOX_TL = "\u256d"           # ╭
+BOX_TR = "\u256e"           # ╮
+BOX_BL = "\u2570"           # ╰
+BOX_BR = "\u256f"           # ╯
+BOX_V = "\u2502"            # │
+
+
+def _print_banner() -> None:
+    """Compact banner shown at the top of ``init``."""
+    top = "  " + BOX_TL + ("\u2500" * 60) + BOX_TR
+    bot = "  " + BOX_BL + ("\u2500" * 60) + BOX_BR
+    mid = "  " + BOX_V + "  " + "SkillSyncer" + "  agent skills that sync, fill, protect themselves" + "  " + BOX_V
+    _out("")
+    _out(C.cyan(top))
+    _out(C.cyan("  " + BOX_V + "  ") + C.bold("SkillSyncer") + C.dim("  agent skills that sync, fill, protect themselves") + C.cyan("  " + BOX_V))
+    _out(C.cyan(bot))
+    _out("")
+
+
+def _print_next_steps(steps: list[tuple[str, str | None, str]]) -> None:
+    """Print a numbered "Next steps" block.
+
+    Each step is ``(title, command_or_None, explanation)``. The
+    explanation may be multi-line; lines are dimmed.
+    """
+    _out("")
+    _out(C.bold(C.yellow("\u250c\u2500 What's next? \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")))
+    for i, (title, command, explanation) in enumerate(steps, 1):
+        _out("")
+        _out(f"  {C.bold(C.yellow(f'{i}.'))} {C.bold(title)}")
+        if command:
+            _out(f"       {C.cyan(command)}")
+        if explanation:
+            for line in explanation.strip().split("\n"):
+                _out(f"       {C.dim(line)}")
+    _out("")
+
+
+def _section(title: str) -> str:
+    return C.bold(C.cyan(title))
+
+
+def _ok(text: str) -> str:
+    return C.green(GLYPH_CHECK) + " " + text
+
+
+def _warn(text: str) -> str:
+    return C.yellow("!") + " " + text
+
+
+def _err_marker(text: str) -> str:
+    return C.red(GLYPH_CROSS) + " " + text
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +258,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         _out(json.dumps(safe, indent=2))
         return 0
 
+    # Interactive (human) output starts here.
+    _print_banner()
+
     config = read_config()
     config.setdefault("sources", [])
     if not config.get("targets"):
@@ -164,81 +273,101 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not paths.identity_path().exists():
         write_identity({"secrets": {}, "overrides": {}})
 
-    _out(f"\u2713 SkillSyncer initialized at {home}\n")
+    _out(_ok(C.bold("SkillSyncer initialized")) + "  " + C.dim(str(home)))
+    _out("")
 
     found_agents = [a for a in proposal["agents"] if a["found"]]
     if found_agents:
-        _out("Agents detected:")
+        _out(_section("Agents detected") + C.dim(f"  ({len(found_agents)})"))
         for a in found_agents:
-            _out(f"  \u2713 {a['name']:<14} {a['path']}")
+            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(a['name']):<22} {C.dim(a['path'])}")
     else:
-        _out("No known agents detected on this machine.")
+        _out(_section("Agents detected") + C.dim("  (0)"))
+        _out(C.dim("  No known agents on this machine."))
 
     if proposal["existing_skills"]:
-        # Group by agent and cap each group so the output stays readable
-        # even on machines with hundreds of skills.
         SKILLS_PER_AGENT = 8
         by_agent: dict[str, list[dict]] = {}
         for s in proposal["existing_skills"]:
             by_agent.setdefault(s["agent"], []).append(s)
 
         total = len(proposal["existing_skills"])
-        _out(f"\nExisting skills: {total}")
+        _out("")
+        _out(_section("Existing skills") + C.dim(f"  ({total})"))
         for agent_name in sorted(by_agent):
             group = by_agent[agent_name]
-            _out(f"  {agent_name} ({len(group)}):")
+            _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
             for s in group[:SKILLS_PER_AGENT]:
                 tags = []
                 if s["has_placeholders"]:
-                    tags.append("placeholders")
+                    tags.append(C.cyan("placeholders"))
                 if s["has_hardcoded_secrets"]:
-                    tags.append("hardcoded-secret")
-                tail = f" [{', '.join(tags)}]" if tags else ""
+                    tags.append(C.red("hardcoded-secret"))
+                tail = f"  [{', '.join(tags)}]" if tags else ""
                 _out(f"    \u00b7 {s['name']}{tail}")
             if len(group) > SKILLS_PER_AGENT:
-                _out(f"    \u00b7 \u2026 and {len(group) - SKILLS_PER_AGENT} more")
+                _out(C.dim(f"    \u00b7 \u2026 and {len(group) - SKILLS_PER_AGENT} more"))
 
+    _out("")
     if not proposal.get("credential_scan_performed"):
-        _out("\nCredentials: scan skipped.")
-        _out("  \u2192 re-run `skillsyncer init --yes` to scan, or set secrets")
-        _out("    by hand with `skillsyncer secret-set <KEY> <VALUE>`.")
+        _out(_section("Credentials") + C.dim("  (scan skipped)"))
+        _out(C.dim("  Re-run `skillsyncer init --yes` to scan, or add secrets by hand"))
+        _out(C.dim("  with `skillsyncer secret-set <KEY> <VALUE>`."))
     elif proposal["credentials"]:
-        # Group by key so duplicates (same key, different values from
-        # different paths) collapse into one line with a candidate count.
         by_key: dict[str, list[dict]] = {}
         for c in proposal["credentials"]:
             by_key.setdefault(c["key"], []).append(c)
 
         unique = len(by_key)
         total = len(proposal["credentials"])
-        header = f"\nCredentials found: {unique} unique"
+        header = _section("Credentials found") + C.dim(f"  ({unique} unique")
         if total != unique:
-            header += f" ({total} candidates total)"
+            header += C.dim(f", {total} candidates")
+        header += C.dim(")")
         _out(header)
         for key in sorted(by_key):
             candidates = by_key[key]
-            first = candidates[0]
             sources = sorted({c["source"] for c in candidates})
             primary_source = sources[0]
             extras = ""
             if len(candidates) > 1:
-                extras = f"  ({len(candidates)} values"
+                detail = f"{len(candidates)} values"
                 if len(sources) > 1:
-                    extras += f" across {len(sources)} files"
-                extras += ")"
-            # Print KEY NAMES only — never values.
-            _out(f"  \u00b7 {key:<26} from {primary_source}{extras}")
-        _out("\n  \u2192 re-run with `skillsyncer secret-set <KEY> <VALUE>` to import.")
+                    detail += f" across {len(sources)} files"
+                extras = "  " + C.yellow(f"({detail})")
+            _out(f"  {C.green(GLYPH_CHECK)}  {C.bold(key):<32} {C.dim(primary_source)}{extras}")
     else:
-        _out("\nCredentials: scan completed, nothing matched.")
+        _out(_section("Credentials found") + C.dim("  (none)"))
 
     git = proposal["git"]
-    if git["current_project_remote"]:
-        _out(f"\nCurrent project remote: {git['current_project_remote']}")
-    if git["gh_authenticated"]:
-        _out("gh CLI authenticated \u2014 `skillsyncer add` can clone private repos.")
+    if git.get("current_project_remote") or git.get("gh_authenticated"):
+        _out("")
+        _out(_section("Git"))
+        if git.get("current_project_remote"):
+            _out(f"  {C.dim('current project remote:')} {git['current_project_remote']}")
+        if git.get("gh_authenticated"):
+            _out(f"  {C.green(GLYPH_CHECK)} {C.dim('gh CLI authenticated — `skillsyncer add` can clone private repos.')}")
 
-    _out("\nNext: skillsyncer add <git-url>  to register a skills source.")
+    _print_next_steps([
+        (
+            "Register a skills repo to sync skills across machines",
+            "skillsyncer add git@github.com:you/agent-skills.git",
+            "Clones the repo into ~/.skillsyncer/repos/, installs the\n"
+            "pre-push and post-merge git hooks, and tracks it as a source.",
+        ),
+        (
+            "List every skill SkillSyncer can see",
+            "skillsyncer skills",
+            "Shows all SKILL.md files found in your detected agent dirs,\n"
+            "grouped by agent, with placeholder / hardcoded-secret flags.",
+        ),
+        (
+            "Hydrate ${{...}} placeholders into your agent dirs",
+            "skillsyncer render",
+            "Reads any registered source repo and writes rendered skills\n"
+            "into ~/.claude/skills/, ~/.cursor/skills/, etc.",
+        ),
+    ])
     return 0
 
 
@@ -289,12 +418,33 @@ def cmd_add(args: argparse.Namespace) -> int:
     else:
         sources.append({"name": name, "url": url, "path": local_path})
     write_config(config)
-    _out(f"[skillsyncer] added source: {name}")
     _out("")
-    _out("Next:")
-    _out(f"  skillsyncer publish              # cherry-pick existing skills to publish")
-    _out(f"  skillsyncer publish --all        # publish every detected skill (not recommended)")
-    _out(f"  skillsyncer render               # hydrate \u007b\u007b}}\u007d\u007d placeholders into agent dirs")
+    _out(_ok(f"Added source {C.bold(name)}") + "  " + C.dim(local_path))
+
+    _print_next_steps([
+        (
+            f"Cherry-pick which local skills to publish into {name}",
+            "skillsyncer publish",
+            "Lists every skill SkillSyncer found in your agent dirs,\n"
+            "lets you pick which to share, copies them into the source\n"
+            "repo, injects the SkillSyncer preamble (so anyone who\n"
+            "pulls the repo gets SkillSyncer auto-installed by their\n"
+            "agent), and creates a git commit ready to push.",
+        ),
+        (
+            "Or publish every detected skill at once (not recommended)",
+            "skillsyncer publish --all",
+            "Same as above but skips the picker. Use this only when you\n"
+            "really do want to share every skill currently on this machine.",
+        ),
+        (
+            "Or skip publishing and just render placeholders",
+            "skillsyncer render",
+            "If the source repo already has skills with ${{...}} placeholders,\n"
+            "this hydrates them and writes the rendered files into your\n"
+            "agent dirs (~/.claude/skills/, ~/.cursor/skills/, etc.).",
+        ),
+    ])
     return 0
 
 
@@ -536,12 +686,101 @@ def cmd_publish(args: argparse.Namespace) -> int:
         _err(f"[skillsyncer] git error: {exc}")
         return 2
 
-    _out(f"\n[skillsyncer] \u2713 {len(copied)} skill(s) committed to {target['name']}.")
     _out("")
-    _out("To publish, run:")
-    _out(f"  git -C {target_path} push")
+    _out(_ok(f"{len(copied)} skill(s) committed to {C.bold(target['name'])}"))
+    for s in copied:
+        _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}")
+
+    _print_next_steps([
+        (
+            "Send the commit upstream",
+            f"git -C {target_path} push",
+            "The pre-push hook will run a final regex scan over the staged\n"
+            "files before the push goes out. If it finds any hardcoded\n"
+            "secret it'll auto-template what it can and ask you to name\n"
+            "what it can't.",
+        ),
+        (
+            "Anyone who pulls this repo gets SkillSyncer auto-installed",
+            None,
+            "Each SKILL.md you just published has the bootstrap preamble\n"
+            "injected. When a teammate's agent loads the skill, it sees the\n"
+            "preamble, runs the install one-liner itself, scans for\n"
+            "credentials, and renders. They never type the install command.",
+        ),
+    ])
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# skills — list every local skill SkillSyncer can see
+# ---------------------------------------------------------------------------
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    skills = _find_local_skills()
+
+    if args.json:
+        payload = [
+            {
+                "name": s["name"],
+                "agent": s["agent"],
+                "path": str(s["md"]),
+            }
+            for s in skills
+        ]
+        _out(json.dumps(payload, indent=2))
+        return 0
+
+    if not skills:
+        _out(C.dim("No skills found in any detected agent dir."))
+        _out(C.dim("Run `skillsyncer init` first if you haven't yet."))
+        return 0
+
+    # Optionally filter by agent
+    if args.agent:
+        skills = [s for s in skills if s["agent"] == args.agent]
+        if not skills:
+            _err(f"[skillsyncer] no skills found for agent: {args.agent}")
+            return 2
+
+    # Group by agent for display
+    by_agent: dict[str, list[dict]] = {}
+    for s in skills:
+        by_agent.setdefault(s["agent"], []).append(s)
+
+    # Inspect each skill for placeholders / hardcoded secrets so the
+    # listing matches the visual style of `init`.
+    import re as _re
+    placeholder_re = _re.compile(r"\$\{\{[A-Z_][A-Z0-9_]*\}\}")
+    identity_secrets = (read_identity().get("secrets") or {})
+
+    total = sum(len(v) for v in by_agent.values())
     _out("")
-    _out("The pre-push hook will run a final security scan before the push goes out.")
+    _out(_section("Local skills") + C.dim(f"  ({total})"))
+    for agent_name in sorted(by_agent):
+        group = by_agent[agent_name]
+        _out("")
+        _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
+        for s in sorted(group, key=lambda x: x["name"]):
+            md = s["md"]
+            tags = []
+            try:
+                content = md.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            if placeholder_re.search(content):
+                tags.append(C.cyan("placeholders"))
+            if "skillsyncer:require" in content:
+                tags.append(C.green("skillsyncer-managed"))
+            from .scanner import scan_content
+            if scan_content(content, identity_secrets):
+                tags.append(C.red("hardcoded-secret"))
+            tail = "  [" + ", ".join(tags) + "]" if tags else ""
+            _out(f"    \u00b7 {C.bold(s['name']):<32}{C.dim(tail)}")
+
+    _out("")
+    _out(C.dim(f"Total: {total} skill(s) across {len(by_agent)} agent(s)."))
     return 0
 
 
@@ -604,11 +843,46 @@ def cmd_render(args: argparse.Namespace) -> int:
         finalize_report(report, status="partial" if fill_report["unfilled"] else "passed")
 
     if fill_report["unfilled"]:
-        _err("[skillsyncer] some skills still need credentials:")
+        _out("")
+        _out(_warn(C.bold(f"{len(fill_report['skills'])} skill(s) rendered")) + C.dim(", but some are missing credentials:"))
         for skill, keys in fill_report["unfilled"].items():
-            _err(f"  {skill}: {', '.join(keys)}")
+            _out(f"  {C.yellow('!')} {C.bold(skill):<24} needs " + ", ".join(C.cyan(k) for k in keys))
+        _print_next_steps([
+            (
+                "Provide the missing values directly",
+                "skillsyncer secret-set <KEY> <VALUE>",
+                "Adds the value to identity.yaml. Re-run `skillsyncer render`\n"
+                "afterwards to fill the placeholders.",
+            ),
+            (
+                "Or ask your agent to find them automatically",
+                None,
+                "Open Claude Code (or any agent with the SkillSyncer operator\n"
+                "skill installed) and say: \"Fill in the missing SkillSyncer\n"
+                "credentials.\" The operator searches your .env files, shell,\n"
+                "and other tool configs before asking you anything.",
+            ),
+        ])
         return 1
-    _out(f"[skillsyncer] rendered {len(fill_report['skills'])} skill(s)")
+    _out("")
+    _out(_ok(C.bold(f"Rendered {len(fill_report['skills'])} skill(s)")))
+    if fill_report.get("written"):
+        target_count = len({Path(p).parent.parent for p in fill_report['written']})
+        _out(C.dim(f"  Written into {target_count} agent dir(s)."))
+    _print_next_steps([
+        (
+            "Use your skills",
+            None,
+            "Open Claude Code, Cursor, Codex, OpenClaw, Hermes, or any\n"
+            "other detected agent. The skills are already configured.",
+        ),
+        (
+            "See what's installed",
+            "skillsyncer status",
+            "Lists every skill SkillSyncer is tracking, with sync state\n"
+            "and missing-secret warnings.",
+        ),
+    ])
     return 0
 
 
@@ -891,6 +1165,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Publish only this skill (repeatable).")
     p.set_defaults(func=cmd_publish)
 
+    # skills — list all local skills
+    p = sub.add_parser("skills", help="List every skill SkillSyncer can see in agent dirs.")
+    p.add_argument("--agent", default=None,
+                   help="Filter to skills under a single agent (e.g. claude-code).")
+    p.add_argument("--json", action="store_true",
+                   help="Print as JSON instead of the formatted listing.")
+    p.set_defaults(func=cmd_skills)
+
     # fill
     p = sub.add_parser("fill", help="Resolve unfilled placeholders from env / identity / cascade.")
     p.add_argument("--auto", dest="auto_fill_flag", action="store_true")
@@ -970,6 +1252,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    C.init()
     parser = _build_parser()
     args = parser.parse_args(argv)
     rc = args.func(args)

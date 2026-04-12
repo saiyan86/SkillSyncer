@@ -204,8 +204,8 @@ def test_render_exit_1_when_unfilled(home, capsys, tmp_path):
     capsys.readouterr()
     rc = _invoke("render")
     assert rc == 1
-    err = capsys.readouterr().err
-    assert "MISSING_KEY" in err
+    captured = capsys.readouterr()
+    assert "MISSING_KEY" in (captured.out + captured.err)
 
 
 def test_fill_auto_from_env(home, capsys, tmp_path, monkeypatch):
@@ -395,6 +395,53 @@ def test_publish_no_source_errors(home, capsys, monkeypatch, tmp_path):
     rc = _invoke("publish", "--all")
     assert rc == 2
     assert "No sources registered" in capsys.readouterr().err
+
+
+def test_skills_lists_local_skills(fake_machine, capsys):
+    rc = _invoke("skills")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "energy" in out
+    assert "claude-code" in out
+
+
+def test_skills_filter_by_agent(fake_machine, capsys):
+    # Add a hermes skill
+    hermes = fake_machine["fake_home"] / ".hermes" / "skills" / "dogfood"
+    hermes.mkdir(parents=True)
+    (hermes / "SKILL.md").write_text("# dogfood")
+    rc = _invoke("skills", "--agent", "hermes")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dogfood" in out
+    assert "energy" not in out  # claude-code skill filtered out
+
+
+def test_skills_json(fake_machine, capsys):
+    rc = _invoke("skills", "--json")
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    names = [s["name"] for s in payload]
+    assert "energy" in names
+
+
+def test_skills_unknown_agent_errors(fake_machine, capsys):
+    rc = _invoke("skills", "--agent", "no-such-agent")
+    assert rc == 2
+    assert "no skills found" in capsys.readouterr().err.lower()
+
+
+def test_publish_injects_customize_instructions_preamble(fake_machine, capsys):
+    """The preamble injected on publish should include the AGENT
+    "customize this skill" instructions, not just the install one-liner."""
+    _invoke("publish", "--all")
+    src = fake_machine["source"]
+    md = (src / "energy" / "SKILL.md").read_text(encoding="utf-8")
+    assert "skillsyncer:require" in md
+    assert "AGENT" in md  # "AGENT — adapt this skill..."
+    assert "fill --auto" in md
+    assert "customize" in md.lower()
 
 
 def test_publish_idempotent_no_changes(fake_machine, capsys):
