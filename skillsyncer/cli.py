@@ -110,12 +110,23 @@ GLYPH_CROSS = "\u2717"      # ✗
 GLYPH_BULLET = "\u00b7"     # ·
 GLYPH_ARROW = "\u2192"      # →
 GLYPH_ELLIP = "\u2026"      # …
+GLYPH_TRI = "\u25b8"        # ▸
+GLYPH_SQ = "\u25a3"         # ▣
+GLYPH_PROMPT = "\u25b6"     # ▶
 BOX_HEAVY = "\u2500" * 60   # ─ × 60
+# Light rounded box (banner / Next-steps)
 BOX_TL = "\u256d"           # ╭
 BOX_TR = "\u256e"           # ╮
 BOX_BL = "\u2570"           # ╰
 BOX_BR = "\u256f"           # ╯
 BOX_V = "\u2502"            # │
+# Heavy box for the high-attention consent prompt
+BOX_TL_HV = "\u250f"        # ┏
+BOX_TR_HV = "\u2513"        # ┓
+BOX_BL_HV = "\u2517"        # ┗
+BOX_BR_HV = "\u251b"        # ┛
+BOX_V_HV = "\u2503"         # ┃
+BOX_H_HV = "\u2501"         # ━
 
 
 def _print_banner() -> None:
@@ -173,19 +184,32 @@ def _err_marker(text: str) -> str:
 def _consent_prompt(plan: list[dict]) -> bool:
     """Show the user the credential-scan plan and ask for consent.
 
-    Returns True for yes (default), False for no. On a non-interactive
-    stdin, defaults to False so a curl-piped invocation never silently
-    reads files the user didn't approve.
+    Heavy-bordered, colored consent screen so it's visually clear
+    that the user is being asked to approve a security-sensitive
+    operation. The bar on the left is bold yellow (the "attention"
+    color), section labels are bold cyan, ✓ marks are green, and
+    the security promise at the bottom is bold green.
+
+    Returns True for yes (default), False for no. On non-interactive
+    stdin, defaults to False so a curl-piped invocation never
+    silently reads files the user didn't approve.
     """
     existing = [p for p in plan if p["exists"]]
     skipped = len(plan) - len(existing)
 
+    bar = C.yellow(BOX_V_HV)
+    width = 64
+    title = " Credential scan consent "
+    title_pad = (width - len(title) - 2) * BOX_H_HV
+    top = C.yellow(BOX_TL_HV + BOX_H_HV + BOX_H_HV) + " " + C.bold(C.yellow(title.strip())) + " " + C.yellow(BOX_H_HV * (width - len(title) - 4))
+    bot = C.yellow(BOX_BL_HV + BOX_H_HV * (width - 1))
+
     _out("")
-    _out("\u250c\u2500 Credential scan consent " + "\u2500" * 38)
-    _out("\u2502")
-    _out("\u2502  SkillSyncer would like to read these locations to find")
-    _out("\u2502  credentials it can pre-fill in your skills:")
-    _out("\u2502")
+    _out(top)
+    _out(bar)
+    _out(bar + "  " + C.bold("SkillSyncer would like to read these locations to find"))
+    _out(bar + "  " + C.bold("credentials it can pre-fill in your skills:"))
+    _out(bar)
 
     by_kind: dict[str, list[dict]] = {}
     for entry in existing:
@@ -194,33 +218,39 @@ def _consent_prompt(plan: list[dict]) -> bool:
     LABELS = {
         "project": "Project (./)",
         "home": "User home (~)",
-        "ai-tool": "AI tool config dirs",
         "shell": "Shell environment",
+        "ai-tool": "AI tool config dirs",
     }
     for kind in ("project", "home", "shell", "ai-tool"):
         if kind not in by_kind:
             continue
-        _out(f"\u2502  {LABELS[kind]}:")
+        _out(bar + "  " + C.cyan(GLYPH_TRI) + " " + C.bold(C.cyan(LABELS[kind])))
         for e in by_kind[kind]:
-            _out(f"\u2502    \u2713 {e['display']}")
-        _out("\u2502")
+            _out(bar + "      " + C.green(GLYPH_CHECK) + " " + e["display"])
+        _out(bar)
 
     if skipped:
-        _out(f"\u2502  ({skipped} additional locations checked but not present)")
-        _out("\u2502")
-    _out("\u2502  All values stay on this machine. The CLI never prints")
-    _out("\u2502  credential VALUES \u2014 only key NAMES.")
-    _out("\u2514" + "\u2500" * 62)
+        _out(bar + "  " + C.dim(f"({skipped} additional locations checked but not present)"))
+        _out(bar)
+    _out(bar + "  " + C.bold(C.green(GLYPH_SQ + "  Values stay on this machine.")))
+    _out(bar + "     " + C.dim("Only KEY NAMES are ever printed \u2014 never the values."))
+    _out(bar)
+    _out(bot)
     _out("")
 
     if not sys.stdin.isatty():
-        _err("[skillsyncer] non-interactive shell \u2014 skipping credential scan.")
-        _err("[skillsyncer] re-run `skillsyncer init --yes` to scan, or")
-        _err("[skillsyncer] `skillsyncer init --no-scan` to silence this notice.")
+        _err(C.yellow("[skillsyncer] non-interactive shell \u2014 skipping credential scan."))
+        _err(C.dim("[skillsyncer] re-run `skillsyncer init --yes` to scan, or"))
+        _err(C.dim("[skillsyncer] `skillsyncer init --no-scan` to silence this notice."))
         return False
 
+    prompt = (
+        "  " + C.bold(C.yellow(GLYPH_PROMPT))
+        + "  " + C.bold("Scan these locations now?")
+        + "  " + C.dim("[Y/n] ")
+    )
     try:
-        answer = input("Scan these locations now? [Y/n] ").strip().lower()
+        answer = input(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
         _out("")
         return False
@@ -557,17 +587,49 @@ def _interactive_skill_picker(skills: list[dict]) -> list[dict] | None:
     return [flat[i - 1] for i in sorted(indexes) if 1 <= i <= len(flat)]
 
 
+# Directories that look like skill content but are actually build artifacts,
+# vendored deps, or VCS metadata. Skipped both when copying a skill into a
+# source repo and when scanning the copy for secrets — otherwise a skill that
+# happens to be a full Node/Python project drags in node_modules, dist
+# binaries, and .git internals (slow scan, huge false-positive count).
+_SKIP_DIRS = frozenset({
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".next",
+    ".cache",
+})
+
+
+def _iter_skill_files(root: Path):
+    """Yield (abs_path, rel_path) for every real file under ``root``,
+    pruning ``_SKIP_DIRS`` in place so we never descend into them."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        base = Path(dirpath)
+        for name in filenames:
+            full = base / name
+            yield full, full.relative_to(root)
+
+
 def _copy_skill_tree(src: Path, dst: Path) -> None:
-    """Copy every file under ``src`` into ``dst``, creating
-    parent dirs as needed. Overwrites individual files but leaves
-    other files in ``dst`` untouched."""
+    """Copy every file under ``src`` into ``dst``, skipping build
+    artifacts and vendored deps. Overwrites individual files but
+    leaves other files in ``dst`` untouched."""
     import shutil
 
     dst.mkdir(parents=True, exist_ok=True)
-    for src_file in src.rglob("*"):
-        if not src_file.is_file():
-            continue
-        rel = src_file.relative_to(src)
+    for src_file, rel in _iter_skill_files(src):
         dst_file = dst / rel
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dst_file)
@@ -645,9 +707,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
     detections: list[dict] = []
     for skill in copied:
         dst_dir = target_path / skill["name"]
-        for f in dst_dir.rglob("*"):
-            if f.is_file():
-                detections.extend(scan_file(f, secrets))
+        for f, _ in _iter_skill_files(dst_dir):
+            detections.extend(scan_file(f, secrets))
 
     if detections:
         _err(f"\n[skillsyncer] pre-flight scan found {len(detections)} potential secret(s):")
