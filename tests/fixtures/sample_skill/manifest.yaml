@@ -1,0 +1,10 @@
+name: energy-diagnose
+version: 0.1.0
+requires:
+  secrets:
+    - name: GATEWAY_URL
+      description: Edge gateway base URL
+    - name: GATEWAY_KEY
+      description: Gateway API key
+values:
+  ALARM_THRESHOLD: 0.85

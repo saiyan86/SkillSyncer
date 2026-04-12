@@ -1,0 +1,6 @@
+secrets:
+  GATEWAY_URL: https://gw.site-a.example.com
+  GATEWAY_KEY: sk-abcdefghij1234567890
+overrides:
+  energy-diagnose:
+    ALARM_THRESHOLD: 0.95
