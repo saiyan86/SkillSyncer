@@ -654,13 +654,13 @@ skillsyncer/
 │   ├── config.py         # config.yaml read/write
 │   ├── state.py          # drift detection
 │   ├── hooks.py          # idempotent git hook install
-│   └── cli.py            # argparse commands (stdlib only)
+│   ├── cli.py            # argparse commands (stdlib only)
+│   └── templates/        # bundled inside the package so they ship
+│       ├── pre-push.sh   #   with every install (uv/pipx/pip)
+│       ├── post-merge.sh
+│       └── preamble.md
 ├── operator/
 │   └── SKILL.md          # the agent operator skill
-├── templates/
-│   ├── pre-push.sh
-│   ├── post-merge.sh
-│   └── preamble.md
 ├── tests/                # 95 tests, all green
 ├── install.sh
 └── pyproject.toml

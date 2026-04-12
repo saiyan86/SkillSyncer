@@ -203,10 +203,31 @@ def cmd_init(args: argparse.Namespace) -> int:
         _out("  \u2192 re-run `skillsyncer init --yes` to scan, or set secrets")
         _out("    by hand with `skillsyncer secret-set <KEY> <VALUE>`.")
     elif proposal["credentials"]:
-        _out(f"\nCredentials found: {len(proposal['credentials'])}")
+        # Group by key so duplicates (same key, different values from
+        # different paths) collapse into one line with a candidate count.
+        by_key: dict[str, list[dict]] = {}
         for c in proposal["credentials"]:
+            by_key.setdefault(c["key"], []).append(c)
+
+        unique = len(by_key)
+        total = len(proposal["credentials"])
+        header = f"\nCredentials found: {unique} unique"
+        if total != unique:
+            header += f" ({total} candidates total)"
+        _out(header)
+        for key in sorted(by_key):
+            candidates = by_key[key]
+            first = candidates[0]
+            sources = sorted({c["source"] for c in candidates})
+            primary_source = sources[0]
+            extras = ""
+            if len(candidates) > 1:
+                extras = f"  ({len(candidates)} values"
+                if len(sources) > 1:
+                    extras += f" across {len(sources)} files"
+                extras += ")"
             # Print KEY NAMES only — never values.
-            _out(f"  \u00b7 {c['key']:<24} from {c['source']}")
+            _out(f"  \u00b7 {key:<26} from {primary_source}{extras}")
         _out("\n  \u2192 re-run with `skillsyncer secret-set <KEY> <VALUE>` to import.")
     else:
         _out("\nCredentials: scan completed, nothing matched.")

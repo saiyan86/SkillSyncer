@@ -71,6 +71,26 @@ def test_init_yes_runs_scan(home, capsys, monkeypatch):
     assert "step-secret-1234567890" not in out
 
 
+def test_init_groups_duplicate_credentials(home, capsys, monkeypatch, tmp_path):
+    """When the discoverer finds the same key with different values
+    from different paths, init should collapse them to one line."""
+    # Build a fake openclaw dir with the same key in two places.
+    fake_home = tmp_path / "fake_home"
+    openclaw = fake_home / ".openclaw"
+    openclaw.mkdir(parents=True)
+    (openclaw / "openclaw.json").write_text(
+        '{"plugins":{"entries":{"brave":{"config":{"webSearch":{"apiKey":"v1"}}}}},'
+        '"models":{"providers":{"brave":{"apiKey":"v2"}}}}'
+    )
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: fake_home))
+    rc = _invoke("init", "--yes")
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The unique key appears once with a "(2 values)" annotation.
+    assert out.count("BRAVE_API_KEY") == 1
+    assert "2 values" in out
+
+
 def test_init_consent_prompt_yes(home, capsys, monkeypatch):
     monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
     # Pretend stdin is a TTY and the user types "y\n".

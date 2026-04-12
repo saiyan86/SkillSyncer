@@ -87,3 +87,16 @@ def test_uninstall_removes_file_when_only_skillsyncer(tmp_path):
 def test_install_raises_outside_git_repo(tmp_path):
     with pytest.raises(FileNotFoundError):
         install_hooks(tmp_path / "not-a-repo")
+
+
+def test_template_files_are_inside_the_package():
+    """Templates must live inside the skillsyncer/ package directory
+    so they ship with every install. The previous layout had them at
+    the project root and broke when installed via uv tool / pipx."""
+    from skillsyncer import hooks as _hooks
+    from pathlib import Path as _Path
+    pkg_dir = _Path(_hooks.__file__).resolve().parent
+    assert _hooks._TEMPLATES_DIR == pkg_dir / "templates"
+    for name in ("pre-push.sh", "post-merge.sh"):
+        assert (_hooks._TEMPLATES_DIR / name).is_file(), \
+            f"missing template: {name}"

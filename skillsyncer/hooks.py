@@ -15,7 +15,10 @@ from ._io import atomic_write
 START_MARKER = "# [skillsyncer:hook]"
 END_MARKER = "# [/skillsyncer:hook]"
 
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+# Templates are bundled INSIDE the package so they ship with every
+# install (uv tool / pipx / pip). Resolving via Path(__file__).parent
+# works for both source checkouts and installed wheels.
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 HOOK_FILES = {
     "pre-push": _TEMPLATES_DIR / "pre-push.sh",
     "post-merge": _TEMPLATES_DIR / "post-merge.sh",
