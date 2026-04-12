@@ -360,7 +360,7 @@ curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall
 iwr -useb https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.ps1 | iex
 ```
 
-What the uninstaller **keeps** (untouched, on purpose):
+What the default uninstaller **keeps** (untouched, on purpose):
 
 - `~/.skillsyncer/identity.yaml` — your secrets
 - `~/.skillsyncer/config.yaml` — your sources/targets
@@ -370,9 +370,39 @@ What the uninstaller **keeps** (untouched, on purpose):
   templates check `command -v skillsyncer` at the top and silently
   exit 0 if the binary is gone, so they never block your push.
 
-To wipe SkillSyncer's data too, run `rm -rf ~/.skillsyncer` after
-the uninstaller. Reinstalling later is the same one-line install
-command — your data picks up where it left off.
+#### `--purge` — wipe data too
+
+If you want a totally clean uninstall — including your secrets,
+sources, and cloned repos — pass `--purge`. The script asks for
+explicit `PURGE` confirmation before deleting anything.
+
+```bash
+# macOS / Linux / WSL / Git Bash
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.sh | sh -s -- --purge
+
+# Windows (PowerShell)
+iex "& { $(iwr -useb https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.ps1) } -Purge"
+```
+
+For non-interactive / scripted runs, add `--yes` (POSIX) or `-Yes`
+(PowerShell) to skip the confirmation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.sh | sh -s -- --purge --yes
+```
+
+`--purge` deletes:
+
+- `~/.skillsyncer/identity.yaml`, `config.yaml`, `state.yaml`
+- `~/.skillsyncer/reports/` (run reports)
+- `~/.skillsyncer/repos/` (cloned source repos — including any
+  unpushed local commits, so push first if you care)
+
+Even with `--purge`, the rendered skills in `~/.claude/skills/`,
+`~/.cursor/skills/`, etc. and the git hooks in your project repos
+are still left alone. To remove those too, delete them by hand —
+SkillSyncer never touches files outside its own home dir without
+an explicit per-file command.
 
 ### What `init` writes
 
