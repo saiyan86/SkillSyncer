@@ -43,15 +43,90 @@ def _make_skill(repo, name, body, manifest=None):
 
 
 def test_init_creates_home(home, capsys):
+    # Default `init` would prompt for consent; in test (non-tty stdin)
+    # the prompt should default to "skip scan" automatically.
     rc = _invoke("init")
     assert rc == 0
     assert (home / "config.yaml").exists()
     assert (home / "identity.yaml").exists()
 
 
+def test_init_no_scan_skips_credential_scan(home, capsys, monkeypatch):
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    rc = _invoke("init", "--no-scan")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "scan skipped" in out.lower() or "Credentials: scan skipped" in out
+    # No values should ever appear regardless.
+    assert "step-secret-1234567890" not in out
+
+
+def test_init_yes_runs_scan(home, capsys, monkeypatch):
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    rc = _invoke("init", "--yes")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "STEPONEAI_API_KEY" in out
+    # Values still must not appear.
+    assert "step-secret-1234567890" not in out
+
+
+def test_init_consent_prompt_yes(home, capsys, monkeypatch):
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    # Pretend stdin is a TTY and the user types "y\n".
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    rc = _invoke("init")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Credential scan consent" in out
+    assert "STEPONEAI_API_KEY" in out
+
+
+def test_init_consent_prompt_no(home, capsys, monkeypatch):
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    rc = _invoke("init")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Credential scan consent" in out
+    # User declined → no creds scanned
+    assert "STEPONEAI_API_KEY" not in out
+    assert "scan skipped" in out.lower()
+
+
+def test_init_json_default_does_not_scan_credentials(home, capsys, monkeypatch):
+    """JSON mode is for the operator agent — it must NOT scan
+    creds without explicit --scan-credentials, since the agent is
+    responsible for asking the user first."""
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    rc = _invoke("init", "--json")
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["credentials"] == []
+    assert payload["credential_scan_performed"] is False
+    assert "credential_scan_plan" in payload
+    assert len(payload["credential_scan_plan"]) > 0
+
+
+def test_init_json_with_scan_credentials_flag(home, capsys, monkeypatch):
+    monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
+    rc = _invoke("init", "--json", "--scan-credentials")
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["credential_scan_performed"] is True
+    keys = {c["key"] for c in payload["credentials"]}
+    assert "STEPONEAI_API_KEY" in keys
+    # Values still stripped from JSON output.
+    for c in payload["credentials"]:
+        assert "value" not in c
+
+
 def test_init_json_excludes_credential_values(home, capsys, monkeypatch):
     monkeypatch.setenv("API_KEY", "sk-very-secret-value-1234567890")
-    rc = _invoke("init", "--json")
+    # Use --scan-credentials so the scan actually runs.
+    rc = _invoke("init", "--json", "--scan-credentials")
     assert rc == 0
     out = capsys.readouterr().out
     payload = json.loads(out)

@@ -27,22 +27,37 @@ When the user is new (or a preamble triggered install):
 1. Run `skillsyncer init --json` to get a discovery proposal. It returns:
    - `agents` — installed agent skill directories.
    - `existing_skills` — current SKILL.md files (and whether any leak).
-   - `credentials` — KEY NAMES discovered from `.env`, docker-compose,
-     `~/.kube/config`, and shell environment. **Values are not printed.**
+   - `credential_scan_plan` — the list of locations SkillSyncer
+     **would** scan for credentials. **No files have been read yet.**
+     Each entry includes `path`, `display`, `exists`, and `kind`
+     (`project`, `home`, `shell`, `ai-tool`).
+   - `credentials` — empty by default (`credential_scan_performed: false`)
+     because the scan needs the user's consent first.
    - `git` — gh authentication state and current project remote.
-2. Present a single proposal to the user. Tell them what was found,
-   what will be set up, and ask one confirmation. Include the repo
-   choice (A: create new, B: existing URL, C: skip — local only).
-3. After confirmation:
-   - Run `skillsyncer init` (writes config + identity skeleton).
+2. **Show the user the credential scan plan** before doing anything
+   else. Group by `kind` and show the locations whose `exists` is true.
+   Tell them: "SkillSyncer would like to read these files to find
+   credentials it can pre-fill in your skills. Values stay on this
+   machine. Only key NAMES are ever printed. OK to scan?"
+3. If the user agrees, run `skillsyncer init --json --scan-credentials`
+   to do the actual scan and get back the discovered credentials.
+   If they decline, run `skillsyncer init --no-scan` and skip directly
+   to step 5.
+4. Present the discovery summary to the user (agents, existing skills,
+   credential KEY NAMES — never values). Ask one confirmation plus
+   the repo choice (A: create new, B: existing URL, C: skip — local).
+5. After confirmation:
+   - Run `skillsyncer init --yes` (writes config + identity skeleton;
+     `--yes` skips the interactive consent prompt since you already
+     handled it in step 2).
    - For each discovered credential the user accepts, run
      `skillsyncer secret-set <KEY> <VALUE>`. **Read the value yourself
      from the source file** — never echo it back to the user.
    - If the user picked a repo, run `skillsyncer add <url>`.
-4. Run `skillsyncer render` to fill all skills.
-5. Walk through any remaining unfilled secrets via the FILL flow.
+6. Run `skillsyncer render` to fill all skills.
+7. Walk through any remaining unfilled secrets via the FILL flow.
 
-One yes plus A/B/C. That is the entire onboarding.
+One consent + one yes + A/B/C. That is the entire onboarding.
 
 ---
 

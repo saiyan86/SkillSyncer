@@ -1,5 +1,9 @@
 #!/bin/bash
 # [skillsyncer:hook] — do not edit this section
+
+# Silent no-op if SkillSyncer was uninstalled.
+command -v skillsyncer >/dev/null 2>&1 || exit 0
+
 CHANGED=$(skillsyncer diff-since-last-sync 2>&1 || true)
 if [ -n "$CHANGED" ]; then
   mkdir -p "$HOME/.skillsyncer/reports"

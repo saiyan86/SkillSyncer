@@ -64,11 +64,84 @@ def _err(msg: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
+def _consent_prompt(plan: list[dict]) -> bool:
+    """Show the user the credential-scan plan and ask for consent.
+
+    Returns True for yes (default), False for no. On a non-interactive
+    stdin, defaults to False so a curl-piped invocation never silently
+    reads files the user didn't approve.
+    """
+    existing = [p for p in plan if p["exists"]]
+    skipped = len(plan) - len(existing)
+
+    _out("")
+    _out("\u250c\u2500 Credential scan consent " + "\u2500" * 38)
+    _out("\u2502")
+    _out("\u2502  SkillSyncer would like to read these locations to find")
+    _out("\u2502  credentials it can pre-fill in your skills:")
+    _out("\u2502")
+
+    by_kind: dict[str, list[dict]] = {}
+    for entry in existing:
+        by_kind.setdefault(entry["kind"], []).append(entry)
+
+    LABELS = {
+        "project": "Project (./)",
+        "home": "User home (~)",
+        "ai-tool": "AI tool config dirs",
+        "shell": "Shell environment",
+    }
+    for kind in ("project", "home", "shell", "ai-tool"):
+        if kind not in by_kind:
+            continue
+        _out(f"\u2502  {LABELS[kind]}:")
+        for e in by_kind[kind]:
+            _out(f"\u2502    \u2713 {e['display']}")
+        _out("\u2502")
+
+    if skipped:
+        _out(f"\u2502  ({skipped} additional locations checked but not present)")
+        _out("\u2502")
+    _out("\u2502  All values stay on this machine. The CLI never prints")
+    _out("\u2502  credential VALUES \u2014 only key NAMES.")
+    _out("\u2514" + "\u2500" * 62)
+    _out("")
+
+    if not sys.stdin.isatty():
+        _err("[skillsyncer] non-interactive shell \u2014 skipping credential scan.")
+        _err("[skillsyncer] re-run `skillsyncer init --yes` to scan, or")
+        _err("[skillsyncer] `skillsyncer init --no-scan` to silence this notice.")
+        return False
+
+    try:
+        answer = input("Scan these locations now? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _out("")
+        return False
+    return answer in ("", "y", "yes")
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     home = paths.home()
     home.mkdir(parents=True, exist_ok=True)
 
-    proposal = discover()
+    # Decide whether we have permission to scan credentials.
+    if args.no_scan:
+        scan_creds = False
+    elif args.as_json:
+        # JSON mode is for the operator agent — never scans without
+        # an explicit --scan-credentials flag, since the agent is
+        # responsible for asking the user for consent first.
+        scan_creds = bool(args.scan_credentials)
+    elif args.yes:
+        scan_creds = True
+    else:
+        # Interactive: do a no-cred discover first so we can show the
+        # plan, then ask the user.
+        preview = discover(scan_credentials=False)
+        scan_creds = _consent_prompt(preview["credential_scan_plan"])
+
+    proposal = discover(scan_credentials=scan_creds)
 
     if args.as_json:
         safe = dict(proposal)
@@ -125,12 +198,18 @@ def cmd_init(args: argparse.Namespace) -> int:
             if len(group) > SKILLS_PER_AGENT:
                 _out(f"    \u00b7 \u2026 and {len(group) - SKILLS_PER_AGENT} more")
 
-    if proposal["credentials"]:
+    if not proposal.get("credential_scan_performed"):
+        _out("\nCredentials: scan skipped.")
+        _out("  \u2192 re-run `skillsyncer init --yes` to scan, or set secrets")
+        _out("    by hand with `skillsyncer secret-set <KEY> <VALUE>`.")
+    elif proposal["credentials"]:
         _out(f"\nCredentials found: {len(proposal['credentials'])}")
         for c in proposal["credentials"]:
             # Print KEY NAMES only — never values.
             _out(f"  \u00b7 {c['key']:<24} from {c['source']}")
         _out("\n  \u2192 re-run with `skillsyncer secret-set <KEY> <VALUE>` to import.")
+    else:
+        _out("\nCredentials: scan completed, nothing matched.")
 
     git = proposal["git"]
     if git["current_project_remote"]:
@@ -506,6 +585,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("init", help="One-time setup: scan environment, write config.")
     p.add_argument("--json", dest="as_json", action="store_true",
                    help="Print discovery result as JSON (no writes).")
+    p.add_argument("--yes", "-y", dest="yes", action="store_true",
+                   help="Skip the credential-scan consent prompt and answer yes.")
+    p.add_argument("--no-scan", dest="no_scan", action="store_true",
+                   help="Skip the credential scan entirely.")
+    p.add_argument("--scan-credentials", dest="scan_credentials", action="store_true",
+                   help="With --json: actually read credentials. The default is "
+                        "to return only the scan plan so the agent layer can "
+                        "ask the user for consent first.")
     p.set_defaults(func=cmd_init)
 
     # add

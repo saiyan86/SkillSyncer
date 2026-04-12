@@ -2,6 +2,11 @@
 # [skillsyncer:hook] — do not edit this section
 set -euo pipefail
 
+# If SkillSyncer was uninstalled, this hook becomes a silent no-op
+# so it never blocks the user's push. Reinstall to re-arm:
+#   curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
+command -v skillsyncer >/dev/null 2>&1 || exit 0
+
 MAX_RETRIES=5
 ATTEMPT=0
 mkdir -p "$HOME/.skillsyncer/reports"

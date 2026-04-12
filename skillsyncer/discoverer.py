@@ -68,18 +68,92 @@ def discover(
     home: str | Path | None = None,
     cwd: str | Path | None = None,
     env: dict | None = None,
+    scan_credentials: bool = True,
 ) -> dict:
-    """Run a full environment scan and return a proposal dict."""
+    """Run an environment scan and return a proposal dict.
+
+    When ``scan_credentials`` is False, the credential scan is skipped
+    entirely (no files are read for credential extraction). The
+    proposal still contains a ``credential_scan_plan`` so callers can
+    show the user what *would* be scanned and ask for consent.
+    """
     home_path = Path(home).expanduser() if home else Path.home()
     cwd_path = Path(cwd) if cwd else Path.cwd()
     env_map = os.environ if env is None else env
 
+    plan = credential_scan_locations(home_path, cwd_path, env_map)
+
     return {
         "agents": _discover_agents(home_path),
         "existing_skills": _discover_existing_skills(home_path),
-        "credentials": _discover_credentials(home_path, cwd_path, env_map),
+        "credentials": (
+            _discover_credentials(home_path, cwd_path, env_map)
+            if scan_credentials else []
+        ),
+        "credential_scan_plan": plan,
+        "credential_scan_performed": scan_credentials,
         "git": _discover_git(cwd_path),
     }
+
+
+def credential_scan_locations(
+    home: Path,
+    cwd: Path,
+    env: dict | None = None,
+) -> list[dict]:
+    """Return the list of locations the credential scan would read.
+
+    Each entry: ``{path, display, exists, kind}``. ``kind`` is one of
+    ``project``, ``shell``, ``home``, ``ai-tool``. Used by the
+    consent screen to tell the user *exactly* what will be touched.
+    """
+    env_map = os.environ if env is None else env
+    plan: list[dict] = []
+
+    def _add(p: Path, kind: str, display: str | None = None) -> None:
+        plan.append({
+            "path": str(p),
+            "display": display or _short(p, home),
+            "exists": _is_user_file(p) or _is_dir_safe(p),
+            "kind": kind,
+        })
+
+    # Project (cwd)
+    for name in (".env", ".env.local", ".env.production"):
+        _add(cwd / name, "project")
+    for name in ("docker-compose.yml", "docker-compose.yaml", "docker-compose.override.yml"):
+        _add(cwd / name, "project")
+
+    # User home
+    for name in (".env", ".env.local"):
+        _add(home / name, "home")
+    _add(home / ".kube" / "config", "home")
+
+    # AI tool config dirs (system-wide sweep)
+    for d in _ai_tool_dirs(home):
+        _add(d, "ai-tool")
+
+    # Shell environment — represented as a single entry, since we
+    # never scan individual vars; we just filter os.environ.
+    cred_var_count = sum(
+        1 for k in env_map
+        if k not in _SYSTEM_ENV and _looks_credential(k)
+    )
+    plan.append({
+        "path": "(shell environment)",
+        "display": f"$ENV (matched {cred_var_count} credential-shaped vars)",
+        "exists": cred_var_count > 0,
+        "kind": "shell",
+    })
+
+    return plan
+
+
+def _short(p: Path, home: Path) -> str:
+    try:
+        return "~/" + str(p.relative_to(home))
+    except ValueError:
+        return str(p)
 
 
 # ---------------------------------------------------------------------------

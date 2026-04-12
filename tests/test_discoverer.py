@@ -171,9 +171,38 @@ def test_discover_existing_skills_detects_hardcoded_secret(tmp_path):
 
 def test_discover_returns_full_shape(tmp_path):
     result = discover(home=tmp_path / "home", cwd=tmp_path, env={})
-    assert set(result.keys()) == {"agents", "existing_skills", "credentials", "git"}
+    assert set(result.keys()) == {
+        "agents", "existing_skills", "credentials",
+        "credential_scan_plan", "credential_scan_performed", "git",
+    }
     assert isinstance(result["git"], dict)
     assert "gh_authenticated" in result["git"]
+    assert result["credential_scan_performed"] is True
+    assert isinstance(result["credential_scan_plan"], list)
+
+
+def test_discover_skips_creds_when_scan_disabled(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text("API_KEY=should-not-appear\n")
+    result = discover(home=home, cwd=tmp_path, env={"OPENAI_KEY": "x"}, scan_credentials=False)
+    assert result["credentials"] == []
+    assert result["credential_scan_performed"] is False
+    # The plan still tells callers what *would* have been scanned.
+    paths = {p["display"] for p in result["credential_scan_plan"]}
+    assert any("env" in d for d in paths)
+
+
+def test_credential_scan_plan_includes_ai_tool_dirs(tmp_path):
+    home = tmp_path / "home"
+    (home / ".openclaw").mkdir(parents=True)
+    result = discover(home=home, cwd=tmp_path, env={})
+    plan = result["credential_scan_plan"]
+    by_kind = {}
+    for p in plan:
+        by_kind.setdefault(p["kind"], []).append(p)
+    assert "ai-tool" in by_kind
+    assert any(".openclaw" in p["display"] and p["exists"] for p in by_kind["ai-tool"])
 
 
 def test_existing_skills_dedup_and_depth_one(tmp_path):

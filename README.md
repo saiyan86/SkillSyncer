@@ -249,6 +249,85 @@ don't run SkillSyncer commands by hand unless you want to.
 > (or under WSL). Hooks are installed by SkillSyncer itself, so you
 > don't need to think about it.
 
+### Credential scan consent
+
+The first time you run `skillsyncer init`, it shows you exactly which
+files it would read before reading any of them:
+
+```
+┌─ Credential scan consent ──────────────────────────────────────
+│
+│  SkillSyncer would like to read these locations to find
+│  credentials it can pre-fill in your skills:
+│
+│  Project (./):
+│    ✓ .env.local
+│    ✓ docker-compose.yml
+│
+│  User home (~):
+│    ✓ ~/.kube/config
+│
+│  Shell environment:
+│    ✓ $ENV (matched 4 credential-shaped vars)
+│
+│  AI tool config dirs:
+│    ✓ ~/.openclaw
+│    ✓ ~/.config/anthropic
+│    ✓ ~/.litellm
+│
+│  All values stay on this machine. The CLI never prints
+│  credential VALUES — only key NAMES.
+└──────────────────────────────────────────────────────────────
+Scan these locations now? [Y/n]
+```
+
+Type `n` to skip the scan entirely. You can re-run later, or set
+secrets by hand with `skillsyncer secret-set <KEY> <VALUE>`.
+
+For scripted use:
+
+```bash
+skillsyncer init --yes        # pre-confirm: scan without prompting
+skillsyncer init --no-scan    # explicitly skip the scan
+```
+
+For agents using `init --json`: the JSON proposal includes a
+`credential_scan_plan` (the list of locations) but **no actual
+credentials**. The agent shows the plan to the user, gets consent,
+then re-runs `init --json --scan-credentials` to do the read. This
+way the deterministic CLI never reads credential files until the
+user has seen exactly what will be touched.
+
+### Uninstall
+
+One line. Removes the binary, leaves your data alone.
+
+**macOS / Linux / WSL / Git Bash**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/uninstall.ps1 | iex
+```
+
+What the uninstaller **keeps** (untouched, on purpose):
+
+- `~/.skillsyncer/identity.yaml` — your secrets
+- `~/.skillsyncer/config.yaml` — your sources/targets
+- `~/.skillsyncer/state.yaml` — sync state
+- `~/.claude/skills/`, `~/.cursor/skills/`, etc. — your rendered skills
+- `.git/hooks/pre-push` and `post-merge` in your repos — the hook
+  templates check `command -v skillsyncer` at the top and silently
+  exit 0 if the binary is gone, so they never block your push.
+
+To wipe SkillSyncer's data too, run `rm -rf ~/.skillsyncer` after
+the uninstaller. Reinstalling later is the same one-line install
+command — your data picks up where it left off.
+
 ### What `init` writes
 
 ```
