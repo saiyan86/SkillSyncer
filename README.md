@@ -491,6 +491,7 @@ skillsyncer init                          # one-time setup; scans environment
 skillsyncer init --json                   # discovery proposal as JSON (for agents)
 
 skillsyncer add <git-url> [--name=NAME]   # register a skills source + install hooks
+skillsyncer publish [--all] [--skill X]   # cherry-pick local skills into a source repo
 skillsyncer render                        # hydrate ${{}} placeholders into agent dirs
 skillsyncer fill --auto                   # resolve from env / cascade / defaults
 skillsyncer scan [--staged] [--format=json] [--path=DIR]

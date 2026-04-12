@@ -23,7 +23,7 @@ import yaml
 from . import __version__, hooks, paths
 from ._io import atomic_write
 from .config import detect_targets, read_config, write_config
-from .discoverer import discover
+from .discoverer import _discover_agents, discover
 from .filler import auto_fill
 from .guarder import guard_fix
 from .identity import list_secret_keys, read_identity, set_secret, write_identity
@@ -290,6 +290,258 @@ def cmd_add(args: argparse.Namespace) -> int:
         sources.append({"name": name, "url": url, "path": local_path})
     write_config(config)
     _out(f"[skillsyncer] added source: {name}")
+    _out("")
+    _out("Next:")
+    _out(f"  skillsyncer publish              # cherry-pick existing skills to publish")
+    _out(f"  skillsyncer publish --all        # publish every detected skill (not recommended)")
+    _out(f"  skillsyncer render               # hydrate \u007b\u007b}}\u007d\u007d placeholders into agent dirs")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# publish — copy local skills into a registered source repo
+# ---------------------------------------------------------------------------
+
+
+def _find_local_skills() -> list[dict]:
+    """Return ``[{name, agent, dir, md}]`` for every depth-1 skill
+    found under each detected agent dir."""
+    home_path = Path.home()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for agent in _discover_agents(home_path):
+        agent_dir = Path(agent["path"])
+        if not agent_dir.is_dir():
+            continue
+        try:
+            children = sorted(agent_dir.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            md = child / "SKILL.md"
+            if not md.is_file():
+                continue
+            key = str(md.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "name": child.name,
+                "agent": agent["name"],
+                "dir": child,
+                "md": md,
+            })
+    return out
+
+
+def _resolve_publish_target(config: dict, name: str | None):
+    sources = config.get("sources") or []
+    if not sources:
+        return None, "No sources registered. Run `skillsyncer add <git-url>` first."
+    if name:
+        match = next((s for s in sources if s.get("name") == name), None)
+        if match is None:
+            return None, f"Source '{name}' not found. Available: {', '.join(s.get('name','?') for s in sources)}"
+        return match, None
+    if len(sources) == 1:
+        return sources[0], None
+    names = ", ".join(s.get("name", "?") for s in sources)
+    return None, f"Multiple sources registered. Use --source <name>: {names}"
+
+
+def _interactive_skill_picker(skills: list[dict]) -> list[dict] | None:
+    """Print a numbered list grouped by agent and parse a selection
+    string like ``"1,3,5-8"`` or ``"all"``. Returns None on cancel."""
+    by_agent: dict[str, list[dict]] = {}
+    for s in skills:
+        by_agent.setdefault(s["agent"], []).append(s)
+
+    flat: list[dict] = []
+    _out("\nAvailable skills to publish:")
+    for agent_name in sorted(by_agent):
+        _out(f"  {agent_name}:")
+        for s in by_agent[agent_name]:
+            flat.append(s)
+            _out(f"    [{len(flat):2d}] {s['name']}")
+    _out("")
+
+    if not sys.stdin.isatty():
+        _err("[skillsyncer] non-interactive shell \u2014 use --all or --skill NAME")
+        return None
+
+    try:
+        answer = input(
+            'Which to publish? (e.g. "1,3,5-8" or "all"; empty to cancel): '
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        _out("")
+        return None
+
+    if not answer:
+        return None
+    if answer.lower() == "all":
+        return flat
+
+    indexes: set[int] = set()
+    for chunk in answer.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            try:
+                a, b = chunk.split("-", 1)
+                for i in range(int(a), int(b) + 1):
+                    indexes.add(i)
+            except ValueError:
+                _err(f"invalid range: {chunk}")
+                return None
+        else:
+            try:
+                indexes.add(int(chunk))
+            except ValueError:
+                _err(f"invalid index: {chunk}")
+                return None
+
+    return [flat[i - 1] for i in sorted(indexes) if 1 <= i <= len(flat)]
+
+
+def _copy_skill_tree(src: Path, dst: Path) -> None:
+    """Copy every file under ``src`` into ``dst``, creating
+    parent dirs as needed. Overwrites individual files but leaves
+    other files in ``dst`` untouched."""
+    import shutil
+
+    dst.mkdir(parents=True, exist_ok=True)
+    for src_file in src.rglob("*"):
+        if not src_file.is_file():
+            continue
+        rel = src_file.relative_to(src)
+        dst_file = dst / rel
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst_file)
+
+
+def _inject_preamble_if_missing(skill_md: Path) -> None:
+    """Prepend the SkillSyncer preamble to a SKILL.md if it doesn't
+    already declare itself as SkillSyncer-managed."""
+    if not skill_md.is_file():
+        return
+    content = skill_md.read_text(encoding="utf-8")
+    if "skillsyncer:require" in content:
+        return
+    preamble_path = Path(__file__).resolve().parent / "templates" / "preamble.md"
+    if not preamble_path.is_file():
+        return
+    preamble = preamble_path.read_text(encoding="utf-8")
+    atomic_write(skill_md, preamble + "\n" + content)
+
+
+def cmd_publish(args: argparse.Namespace) -> int:
+    config = read_config()
+    target, err = _resolve_publish_target(config, args.source)
+    if err:
+        _err(f"[skillsyncer] {err}")
+        return 2
+
+    target_path = Path(target.get("path") or "").expanduser()
+    if not target_path.is_dir():
+        _err(f"[skillsyncer] source dir doesn't exist: {target_path}")
+        return 2
+    if not (target_path / ".git").exists():
+        _err(f"[skillsyncer] source isn't a git repo: {target_path}")
+        return 2
+
+    available = _find_local_skills()
+    if not available:
+        _out("[skillsyncer] no skills found in any agent dir.")
+        return 0
+
+    if args.all:
+        selected = available
+    elif args.skill:
+        names_arg = set(args.skill)
+        selected = [s for s in available if s["name"] in names_arg]
+        missing = names_arg - {s["name"] for s in available}
+        if missing:
+            _err(f"[skillsyncer] skills not found: {', '.join(sorted(missing))}")
+            return 2
+    else:
+        picked = _interactive_skill_picker(available)
+        if picked is None:
+            _out("[skillsyncer] cancelled.")
+            return 0
+        selected = picked
+
+    if not selected:
+        _out("[skillsyncer] nothing selected.")
+        return 0
+
+    _out(f"\n[skillsyncer] copying {len(selected)} skill(s) into {target['name']}\u2026")
+    copied: list[dict] = []
+    for skill in selected:
+        dst_dir = target_path / skill["name"]
+        _copy_skill_tree(skill["dir"], dst_dir)
+        _inject_preamble_if_missing(dst_dir / "SKILL.md")
+        copied.append(skill)
+        _out(f"  \u2713 {skill['name']:<28} (from {skill['agent']})")
+
+    # Pre-flight scan: warn if anything we just copied contains a
+    # secret. The pre-push hook will catch it on push too — this is
+    # just early feedback so the user can clean up before commit.
+    identity = read_identity()
+    secrets = identity.get("secrets") or {}
+    detections: list[dict] = []
+    for skill in copied:
+        dst_dir = target_path / skill["name"]
+        for f in dst_dir.rglob("*"):
+            if f.is_file():
+                detections.extend(scan_file(f, secrets))
+
+    if detections:
+        _err(f"\n[skillsyncer] pre-flight scan found {len(detections)} potential secret(s):")
+        for d in detections:
+            _err(f"  {d.get('file', '?')}:{d['line']}: {d['pattern_label']}")
+        _err("")
+        _err("[skillsyncer] Files were copied but NOT committed.")
+        _err(f"[skillsyncer] Fix these in your agent dirs first, then re-run publish.")
+        _err(f"[skillsyncer] Or run: cd {target_path} && skillsyncer guard --fix")
+        return 1
+
+    # Stage + commit (do not push — that's on the user, and the
+    # pre-push hook will run a final security scan).
+    msg_lines = [
+        f"Publish {len(copied)} skill(s) via SkillSyncer",
+        "",
+    ]
+    for s in copied:
+        msg_lines.append(f"- {s['name']}")
+    msg = "\n".join(msg_lines)
+
+    try:
+        subprocess.run(["git", "-C", str(target_path), "add", "."], check=True)
+        diff = subprocess.run(
+            ["git", "-C", str(target_path), "diff", "--cached", "--quiet"],
+            check=False,
+        )
+        if diff.returncode == 0:
+            _out("\n[skillsyncer] no changes to commit (skills already match the source).")
+            return 0
+        subprocess.run(
+            ["git", "-C", str(target_path), "commit", "-m", msg],
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        _err(f"[skillsyncer] git error: {exc}")
+        return 2
+
+    _out(f"\n[skillsyncer] \u2713 {len(copied)} skill(s) committed to {target['name']}.")
+    _out("")
+    _out("To publish, run:")
+    _out(f"  git -C {target_path} push")
+    _out("")
+    _out("The pre-push hook will run a final security scan before the push goes out.")
     return 0
 
 
@@ -628,6 +880,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("render", help="Hydrate ${{}} placeholders into agent target dirs.")
     p.add_argument("--report", dest="report_path", default=None, help="Report file path.")
     p.set_defaults(func=cmd_render)
+
+    # publish
+    p = sub.add_parser("publish", help="Copy local skills into a registered source repo.")
+    p.add_argument("--source", default=None,
+                   help="Which source to publish into (only needed when more than one is registered).")
+    p.add_argument("--all", action="store_true",
+                   help="Publish every detected local skill (not recommended).")
+    p.add_argument("--skill", action="append", default=[],
+                   help="Publish only this skill (repeatable).")
+    p.set_defaults(func=cmd_publish)
 
     # fill
     p = sub.add_parser("fill", help="Resolve unfilled placeholders from env / identity / cascade.")

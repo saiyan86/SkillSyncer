@@ -302,6 +302,112 @@ def test_status_smoke(home, capsys, tmp_path):
     assert "K" in out
 
 
+@pytest.fixture
+def fake_machine(home, tmp_path, monkeypatch):
+    """Build an isolated 'machine': a fake $HOME with one skill in
+    ~/.claude/skills/, plus a registered source repo at
+    ~/.skillsyncer/repos/<name>/."""
+    fake_home = tmp_path / "machine_home"
+    fake_home.mkdir()
+    # One agent skill
+    skill_dir = fake_home / ".claude" / "skills" / "energy"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Energy\n\nUse the gateway.\n", encoding="utf-8")
+
+    # Source repo
+    source = tmp_path / "source-repo"
+    source.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=source, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=source, check=True)
+
+    # Register the source in config.yaml
+    config = {
+        "sources": [{"name": "yc", "url": "git@example.com:me/yc.git", "path": str(source)}],
+        "targets": [],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    # Make Path.home() return the fake home so _find_local_skills sees it.
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: fake_home))
+    return {"fake_home": fake_home, "source": source, "skill_dir": skill_dir}
+
+
+def test_publish_all_copies_and_commits(fake_machine, capsys):
+    rc = _invoke("publish", "--all")
+    assert rc == 0, capsys.readouterr().out
+    src = fake_machine["source"]
+    out_md = src / "energy" / "SKILL.md"
+    assert out_md.is_file()
+    text = out_md.read_text(encoding="utf-8")
+    assert "skillsyncer:require" in text
+    assert "Use the gateway" in text
+    # Verify a commit was created
+    log = subprocess.run(
+        ["git", "-C", str(src), "log", "--oneline"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "Publish 1 skill" in log
+
+
+def test_publish_specific_skill_only(fake_machine, capsys):
+    # Add a second skill so --skill makes a difference
+    second = fake_machine["fake_home"] / ".claude" / "skills" / "alerting"
+    second.mkdir(parents=True)
+    (second / "SKILL.md").write_text("# Alerting", encoding="utf-8")
+
+    rc = _invoke("publish", "--skill", "energy")
+    assert rc == 0, capsys.readouterr().out
+    src = fake_machine["source"]
+    assert (src / "energy" / "SKILL.md").is_file()
+    assert not (src / "alerting" / "SKILL.md").exists()
+
+
+def test_publish_blocks_on_hardcoded_secret(fake_machine, capsys):
+    # Inject a secret into the skill that the scanner will catch.
+    md = fake_machine["skill_dir"] / "SKILL.md"
+    md.write_text("token sk-abcdefghij1234567890\n", encoding="utf-8")
+    rc = _invoke("publish", "--all")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "pre-flight scan" in err
+    # NO commit should have been created.
+    log = subprocess.run(
+        ["git", "-C", str(fake_machine["source"]), "log", "--oneline"],
+        capture_output=True, text=True,
+    )
+    # Either no log (no commits) or empty stdout
+    assert log.stdout.strip() == ""
+
+
+def test_publish_unknown_skill_errors(fake_machine, capsys):
+    rc = _invoke("publish", "--skill", "does-not-exist")
+    assert rc == 2
+    assert "not found" in capsys.readouterr().err
+
+
+def test_publish_no_source_errors(home, capsys, monkeypatch, tmp_path):
+    fake_home = tmp_path / "machine"
+    fake_home.mkdir()
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: fake_home))
+    # config has no sources
+    (home / "config.yaml").write_text(yaml.safe_dump({"sources": [], "targets": []}), encoding="utf-8")
+    rc = _invoke("publish", "--all")
+    assert rc == 2
+    assert "No sources registered" in capsys.readouterr().err
+
+
+def test_publish_idempotent_no_changes(fake_machine, capsys):
+    # First publish
+    _invoke("publish", "--all")
+    capsys.readouterr()
+    # Second publish — nothing changed → no new commit
+    rc = _invoke("publish", "--all")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no changes to commit" in out
+
+
 def test_report_lifecycle(home, capsys):
     _invoke("init")
     capsys.readouterr()
