@@ -1,5 +1,6 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+# POSIX sh — works under bash, dash, zsh, ash. Don't add bashisms.
+set -eu
 
 VERSION="0.1.0"
 INSTALL_DIR="$HOME/.local/bin"
