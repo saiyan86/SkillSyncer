@@ -11,6 +11,15 @@ curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.s
 > Push it back. Hardcoded secrets are caught and templated
 > automatically. No new tools to learn. No secrets in git. Ever.
 
+> ### Teammates don't have to install anything.
+> Every SkillSyncer-managed skill carries a tiny `<!-- skillsyncer:require -->`
+> preamble at the top. When someone pulls your project, their AI agent
+> reads the preamble, **runs the SkillSyncer install one-liner itself**,
+> scans their machine for the right credentials, and renders the skill.
+> You publish a skill once. Anyone who pulls it gets it working — even
+> if they've never heard of SkillSyncer. That's the viral part. See
+> [Self-bootstrapping](#self-bootstrapping-every-skill-is-an-installer).
+
 [Install](#install) · [The 60-second tour](#the-60-second-tour) · [How it works](#how-it-works) · [CLI cheat sheet](#cli-cheat-sheet) · [Security model](#security-model) · [FAQ](#faq)
 
 ---
@@ -186,10 +195,11 @@ the override.
 
 ## Self-bootstrapping: every skill is an installer
 
-This is the part that makes SkillSyncer spread.
+**This is the part that makes SkillSyncer spread.** Pull a project,
+get SkillSyncer. Pull a skill, get SkillSyncer. The user never types
+the install command — their agent does.
 
-When you write a SkillSyncer-managed skill, you put this preamble at
-the top:
+`skillsyncer publish` injects this preamble into every `SKILL.md`:
 
 ```markdown
 <!-- skillsyncer:require -->
@@ -199,19 +209,49 @@ the top:
 <!-- skillsyncer:end -->
 
 # Energy Gateway Diagnostics
-...
+Connect to ${{GATEWAY_URL}} using ${{GATEWAY_KEY}}.
 ```
 
-Now three things become possible:
+Three scenarios, all of them work without asking the user to install
+anything:
 
 | Scenario                              | What happens                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------- |
-| **Agent reads the skill**             | It sees the preamble, installs SkillSyncer, runs `init`, fills, renders.     |
-| **Human reads the skill**             | They see a comment telling them what to install. Plain-text fallback.        |
-| **Skill is vendored into a project**  | A teammate pulls. Their agent reads the skill. SkillSyncer bootstraps.       |
+| **Agent loads the skill**             | It sees the preamble, runs the install one-liner itself, runs `init`, fills credentials from the user's machine, renders. The user is asked for consent on the credential scan but never types a command. |
+| **`git pull` brings in a new skill**  | Same flow. The post-merge hook (if SkillSyncer is already installed) hydrates placeholders automatically. If it isn't, the agent installs it on first read. |
+| **Human reads the skill**             | They see a plain-text comment block telling them what to install. Manual fallback.                                |
+| **Skill is vendored into a project**  | A teammate clones the project. Their agent reads the skill. SkillSyncer bootstraps on their machine. They're onboarded with one yes. |
 
 You don't have to convince anyone to adopt SkillSyncer. The skill
 adopts them.
+
+### What this looks like in practice
+
+Imagine you publish a skill from your machine with `skillsyncer publish`.
+Now anyone — a teammate, a contractor, the guy you met at the meetup
+last week — can pull your repo and get this:
+
+```
+$ git pull
+... energy-diagnose/SKILL.md is new
+$ <opens the skill in Claude Code / Cursor / Codex / OpenClaw / …>
+
+Agent: I see a SkillSyncer-managed skill but SkillSyncer isn't installed.
+       Installing now…
+
+       (installs via curl|sh, runs `skillsyncer init`)
+
+Agent: Ready. SkillSyncer would like to scan these locations to find
+       credentials it can pre-fill — OK?
+You:   yes
+Agent: Found 4 credentials, including GATEWAY_URL from your .env.local
+       and ANTHROPIC_API_KEY from your shell. The skill needs a
+       GATEWAY_KEY though — do you have one handy?
+You:   sk-abc123
+Agent: Done. energy-diagnose is configured and ready to use.
+```
+
+Total user actions: pull, then say yes twice.
 
 ---
 
@@ -229,7 +269,13 @@ skillsyncer init
 # 3. Register a skills repo (or skip and stay local)
 skillsyncer add git@github.com:you/agent-skills.git
 
-# 4. Done. Your skills are filled and synced to every detected agent.
+# 4. Cherry-pick local skills to publish into the repo.
+#    Each published skill gets the SkillSyncer preamble injected,
+#    which means anyone who pulls your repo gets SkillSyncer
+#    auto-installed by their agent — no instructions to send.
+skillsyncer publish
+
+# 5. Done. Your skills are filled and synced to every detected agent.
 skillsyncer status
 ```
 
@@ -586,6 +632,15 @@ design is built around being small enough to audit in an afternoon.
 ---
 
 ## FAQ
+
+**Do my teammates need to install SkillSyncer before they can use a skill I publish?**
+No. That's the whole point. Every skill `skillsyncer publish` writes
+gets a `<!-- skillsyncer:require -->` preamble injected into its
+`SKILL.md`. When a teammate's agent loads the skill, it sees the
+preamble, runs the SkillSyncer install one-liner itself, scans their
+machine for credentials, and renders. They go from `git pull` to a
+working skill without you sending them setup instructions. See
+[Self-bootstrapping](#self-bootstrapping-every-skill-is-an-installer).
 
 **Why not just use `.env` files?**
 You can. SkillSyncer reads them on `init`. The point is that `.env`
