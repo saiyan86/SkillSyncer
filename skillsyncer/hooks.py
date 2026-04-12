@@ -81,7 +81,12 @@ def install_hooks(repo_path: str | Path) -> list[Path]:
         existing = target.read_text(encoding="utf-8") if target.exists() else ""
         composed = _compose(existing, _read_template(name))
         atomic_write(target, composed)
-        os.chmod(target, 0o755)
+        try:
+            os.chmod(target, 0o755)
+        except OSError:
+            # Filesystem (e.g. exFAT, some Windows mounts) doesn't support
+            # POSIX modes. Git for Windows runs hooks regardless.
+            pass
         written.append(target)
     return written
 
@@ -108,7 +113,10 @@ def uninstall_hooks(repo_path: str | Path) -> list[Path]:
             target.unlink()
         else:
             atomic_write(target, stripped)
-            os.chmod(target, 0o755)
+            try:
+                os.chmod(target, 0o755)
+            except OSError:
+                pass
         touched.append(target)
     return touched
 

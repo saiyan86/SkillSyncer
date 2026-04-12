@@ -217,6 +217,8 @@ adopts them.
 
 ## Quickstart
 
+**macOS / Linux / WSL / Git Bash**
+
 ```bash
 # 1. Install
 curl -fsSL https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.sh | sh
@@ -231,8 +233,21 @@ skillsyncer add git@github.com:you/agent-skills.git
 skillsyncer status
 ```
 
+**Windows (PowerShell)**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.ps1 | iex
+skillsyncer init
+```
+
 That's it. From here on, `git pull` fills, `git push` guards. You
 don't run SkillSyncer commands by hand unless you want to.
+
+> **Cross-platform note.** The CLI is pure Python and runs on macOS,
+> Linux, and Windows. Git hooks ship as POSIX shell scripts; on
+> Windows they run via the bash that ships with Git for Windows
+> (or under WSL). Hooks are installed by SkillSyncer itself, so you
+> don't need to think about it.
 
 ### What `init` writes
 
@@ -248,6 +263,29 @@ don't run SkillSyncer commands by hand unless you want to.
 
 `identity.yaml` is the only file with values. It is never in any git
 repo. Use OS keychain or disk encryption if you want belt + suspenders.
+
+---
+
+## Dependencies
+
+SkillSyncer is small on purpose. Here's the entire footprint:
+
+| Layer                  | What                                                       |
+| ---------------------- | ---------------------------------------------------------- |
+| **Runtime**            | Python 3.9+                                                |
+| **Standard library**   | `argparse`, `json`, `pathlib`, `subprocess`, `re`, `hashlib`, `tempfile`, `os` — that's the whole CLI |
+| **Third-party**        | **`pyyaml`** (one package, used to read user-authored `manifest.yaml`, `docker-compose.yml`, `~/.kube/config`) |
+| **Bundled**            | One ~200-line Markdown skill (`operator/SKILL.md`) and two short shell hook templates |
+
+PyYAML is **installed automatically** by `install.sh` /
+`install.ps1` (and by `pipx` / `uv tool install` / `pip install`),
+so you don't need to install it yourself. You won't be asked to
+install anything else, ever — no Node, no Docker, no Rust toolchain,
+no language server.
+
+If you're worried about supply-chain footprint, that's the answer:
+**one third-party package**. The whole project is a few thousand
+lines you can read in an afternoon.
 
 ---
 
@@ -512,12 +550,12 @@ typing commands. If you prefer typing, skip it.
 ## Architecture in one paragraph
 
 SkillSyncer is a Python CLI plus a Markdown agent skill. The CLI is
-~1500 lines of pure Python (`click`, `pyyaml`, `gitpython`). The
-agent skill is ~200 lines of Markdown the operator agent reads. The
-two communicate by JSON files in `~/.skillsyncer/reports/` — never
-by shared runtime. The CLI is the security boundary; the agent is
-the convenience layer; the boundary is the file format. That's the
-whole system.
+~1500 lines of pure Python on top of the standard library plus
+**one** third-party dependency (`pyyaml`). The agent skill is
+~200 lines of Markdown the operator agent reads. The two communicate
+by JSON files in `~/.skillsyncer/reports/` — never by shared runtime.
+The CLI is the security boundary; the agent is the convenience layer;
+the boundary is the file format. That's the whole system.
 
 ---
 
@@ -537,7 +575,7 @@ skillsyncer/
 │   ├── config.py         # config.yaml read/write
 │   ├── state.py          # drift detection
 │   ├── hooks.py          # idempotent git hook install
-│   └── cli.py            # click commands
+│   └── cli.py            # argparse commands (stdlib only)
 ├── operator/
 │   └── SKILL.md          # the agent operator skill
 ├── templates/

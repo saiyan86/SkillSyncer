@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -28,7 +29,9 @@ def test_install_into_fresh_repo(tmp_path):
     pre = repo / ".git" / "hooks" / "pre-push"
     assert pre.exists()
     assert START_MARKER in pre.read_text()
-    assert os.access(pre, os.X_OK)
+    if sys.platform != "win32":
+        # os.access(..., X_OK) is meaningless on Windows; chmod is best-effort.
+        assert os.access(pre, os.X_OK)
     assert hook_is_installed(repo, "pre-push")
     assert hook_is_installed(repo, "post-merge")
 
