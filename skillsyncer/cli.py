@@ -635,6 +635,112 @@ def _copy_skill_tree(src: Path, dst: Path) -> None:
         shutil.copy2(src_file, dst_file)
 
 
+def _skill_upstream(skill_dir: Path) -> str | None:
+    """If the skill dir is itself a git repo with an ``origin`` remote,
+    return the remote URL. Otherwise return None.
+
+    This is the signal we use to offer "vendor vs reference" at
+    publish time: a skill that has its own upstream is independently
+    versioned and probably shouldn't be copy-pasted into the source
+    repo wholesale.
+    """
+    if not (skill_dir / ".git").exists():
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(skill_dir), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    url = proc.stdout.strip()
+    return url or None
+
+
+def _ask_publish_mode(skill_name: str, upstream: str) -> str:
+    """Ask the user how to publish a skill that has its own upstream.
+
+    Returns one of ``vendor`` / ``reference`` / ``skip``. Falls back
+    to ``vendor`` (current behavior) when stdin isn't a TTY so
+    ``--all`` in CI / piped contexts stays predictable.
+    """
+    if not sys.stdin.isatty():
+        _out("")
+        _out(f"  ! {skill_name} is its own git repo (origin: {upstream})")
+        _out("    non-interactive shell — defaulting to vendor (full copy).")
+        _out("    Re-run interactively to publish as a reference instead.")
+        return "vendor"
+
+    _out("")
+    _out(f"  {C.bold(skill_name)} is its own git repo")
+    _out(f"    origin: {C.dim(upstream)}")
+    _out("")
+    _out(f"    {C.bold('vendor')}     copy the entire skill into the source repo")
+    _out("                + frozen snapshot, fully auditable")
+    _out("                - balloons the source repo, build artifacts may trip the scanner")
+    _out("")
+    _out(f"    {C.bold('reference')}  write a one-line pointer to the upstream")
+    _out("                + source repo stays small")
+    _out("                + teammates always pull the latest upstream version")
+    _out("                - if upstream moves or breaks, this skill breaks too")
+    _out("")
+    _out(f"    {C.bold('skip')}       don't publish this skill at all")
+    _out("")
+    while True:
+        try:
+            answer = input(
+                f"  How to publish {skill_name}? [v]endor / [r]eference / [s]kip (default v): "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _out("")
+            return "skip"
+        if answer in ("", "v", "vendor"):
+            return "vendor"
+        if answer in ("r", "ref", "reference"):
+            return "reference"
+        if answer in ("s", "skip"):
+            return "skip"
+        _out("    please answer v / r / s")
+
+
+def _write_reference_stub(
+    dst_dir: Path,
+    name: str,
+    agent: str,
+    upstream: str,
+) -> None:
+    """Write a SKILL.md stub that points teammates' agents at the
+    upstream repo instead of vendoring the skill tree."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    md = dst_dir / "SKILL.md"
+    body = (
+        f"---\n"
+        f"name: {name}\n"
+        f"skillsyncer:reference: true\n"
+        f"upstream: {upstream}\n"
+        f"agent: {agent}\n"
+        f"---\n\n"
+        f"# {name}\n\n"
+        f"This is a SkillSyncer **reference**, not a vendored skill.\n\n"
+        f"The full skill content lives upstream at:\n\n"
+        f"    {upstream}\n\n"
+        f"To install it on your machine, clone the upstream repo into\n"
+        f"your agent's skills directory:\n\n"
+        f"    git clone {upstream} ~/.{agent}/skills/{name}\n\n"
+        f"After cloning, this stub is replaced by the real skill.\n\n"
+        f"SkillSyncer chose not to vendor the upstream files into this\n"
+        f"source repo because the skill is independently versioned\n"
+        f"upstream. To freeze a snapshot instead, re-run\n"
+        f"`skillsyncer publish` and choose `vendor` for this skill.\n"
+    )
+    atomic_write(md, body)
+
+
 def _inject_preamble_if_missing(skill_md: Path) -> None:
     """Prepend the SkillSyncer preamble to a SKILL.md if it doesn't
     already declare itself as SkillSyncer-managed."""
@@ -690,10 +796,27 @@ def cmd_publish(args: argparse.Namespace) -> int:
         _out("[skillsyncer] nothing selected.")
         return 0
 
-    _out(f"\n[skillsyncer] copying {len(selected)} skill(s) into {target['name']}\u2026")
-    copied: list[dict] = []
+    _out(f"\n[skillsyncer] publishing {len(selected)} skill(s) into {target['name']}\u2026")
+    copied: list[dict] = []        # vendored — full file copy
+    referenced: list[dict] = []    # stub pointing at upstream
     for skill in selected:
         dst_dir = target_path / skill["name"]
+        upstream = _skill_upstream(skill["dir"])
+        mode = "vendor"
+        if upstream:
+            mode = _ask_publish_mode(skill["name"], upstream)
+
+        if mode == "skip":
+            _out(f"  \u00b7 {skill['name']:<28} (skipped)")
+            continue
+
+        if mode == "reference":
+            _write_reference_stub(dst_dir, skill["name"], skill["agent"], upstream)
+            _inject_preamble_if_missing(dst_dir / "SKILL.md")
+            referenced.append({**skill, "upstream": upstream})
+            _out(f"  \u2192 {skill['name']:<28} (reference \u2192 {upstream})")
+            continue
+
         _copy_skill_tree(skill["dir"], dst_dir)
         _inject_preamble_if_missing(dst_dir / "SKILL.md")
         copied.append(skill)
@@ -720,14 +843,21 @@ def cmd_publish(args: argparse.Namespace) -> int:
         _err(f"[skillsyncer] Or run: cd {target_path} && skillsyncer guard --fix")
         return 1
 
+    published = copied + referenced
+    if not published:
+        _out("\n[skillsyncer] nothing to commit (everything was skipped).")
+        return 0
+
     # Stage + commit (do not push — that's on the user, and the
     # pre-push hook will run a final security scan).
     msg_lines = [
-        f"Publish {len(copied)} skill(s) via SkillSyncer",
+        f"Publish {len(published)} skill(s) via SkillSyncer",
         "",
     ]
     for s in copied:
         msg_lines.append(f"- {s['name']}")
+    for s in referenced:
+        msg_lines.append(f"- {s['name']} (reference \u2192 {s['upstream']})")
     msg = "\n".join(msg_lines)
 
     try:
@@ -748,9 +878,11 @@ def cmd_publish(args: argparse.Namespace) -> int:
         return 2
 
     _out("")
-    _out(_ok(f"{len(copied)} skill(s) committed to {C.bold(target['name'])}"))
+    _out(_ok(f"{len(published)} skill(s) committed to {C.bold(target['name'])}"))
     for s in copied:
         _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}")
+    for s in referenced:
+        _out(f"    {C.dim(GLYPH_BULLET)} {s['name']} {C.dim('(reference)')}")
 
     _print_next_steps([
         (
