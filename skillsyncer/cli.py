@@ -102,15 +102,28 @@ def cmd_init(args: argparse.Namespace) -> int:
         _out("No known agents detected on this machine.")
 
     if proposal["existing_skills"]:
-        _out(f"\nExisting skills: {len(proposal['existing_skills'])}")
+        # Group by agent and cap each group so the output stays readable
+        # even on machines with hundreds of skills.
+        SKILLS_PER_AGENT = 8
+        by_agent: dict[str, list[dict]] = {}
         for s in proposal["existing_skills"]:
-            tags = []
-            if s["has_placeholders"]:
-                tags.append("placeholders")
-            if s["has_hardcoded_secrets"]:
-                tags.append("hardcoded-secret")
-            tail = f" [{', '.join(tags)}]" if tags else ""
-            _out(f"  \u00b7 {s['agent']}/{s['name']}{tail}")
+            by_agent.setdefault(s["agent"], []).append(s)
+
+        total = len(proposal["existing_skills"])
+        _out(f"\nExisting skills: {total}")
+        for agent_name in sorted(by_agent):
+            group = by_agent[agent_name]
+            _out(f"  {agent_name} ({len(group)}):")
+            for s in group[:SKILLS_PER_AGENT]:
+                tags = []
+                if s["has_placeholders"]:
+                    tags.append("placeholders")
+                if s["has_hardcoded_secrets"]:
+                    tags.append("hardcoded-secret")
+                tail = f" [{', '.join(tags)}]" if tags else ""
+                _out(f"    \u00b7 {s['name']}{tail}")
+            if len(group) > SKILLS_PER_AGENT:
+                _out(f"    \u00b7 \u2026 and {len(group) - SKILLS_PER_AGENT} more")
 
     if proposal["credentials"]:
         _out(f"\nCredentials found: {len(proposal['credentials'])}")

@@ -14,11 +14,20 @@ from . import paths
 from ._io import atomic_write
 
 KNOWN_AGENTS = [
-    {"name": "claude-code", "paths": ["~/.claude/skills"]},
-    {"name": "cursor", "paths": ["~/.cursor/skills"]},
-    {"name": "windsurf", "paths": ["~/.windsurf/skills"]},
-    {"name": "gemini", "paths": ["~/.gemini/skills"]},
-    {"name": "codex", "paths": ["~/.codex/skills"]},
+    {"name": "claude-code",   "paths": ["~/.claude/skills"]},
+    {"name": "claude-cowork", "paths": ["~/.claude-cowork/skills",
+                                        "~/.config/claude-cowork/skills",
+                                        "~/.claude/cowork/skills"]},
+    {"name": "cursor",        "paths": ["~/.cursor/skills"]},
+    {"name": "windsurf",      "paths": ["~/.windsurf/skills"]},
+    {"name": "gemini",        "paths": ["~/.gemini/skills"]},
+    {"name": "codex",         "paths": ["~/.codex/skills"]},
+    {"name": "openclaw",      "paths": ["~/.openclaw/skills",
+                                        "~/.openclaw/agents",
+                                        "~/openclaw/skills"]},
+    {"name": "hermes",        "paths": ["~/.hermes/skills",
+                                        "~/.hermes/agents",
+                                        "~/.config/hermes/skills"]},
 ]
 
 

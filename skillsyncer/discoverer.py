@@ -22,9 +22,14 @@ from .scanner import scan_content
 
 PLACEHOLDER_RE = re.compile(r"\$\{\{[A-Z_][A-Z0-9_]*\}\}")
 
-# These are the only env-var name fragments we treat as credential-ish.
+# env-var name fragments we treat as credential-ish. Includes the
+# common AI provider prefixes so e.g. ANTHROPIC_BASE_URL still
+# matches even though it doesn't end in KEY/TOKEN/etc.
 _CRED_NAME_PATTERN = re.compile(
-    r"(KEY|TOKEN|SECRET|API|URL|WEBHOOK|PASSWORD|PASSWD|CREDENTIAL|ENDPOINT)",
+    r"(KEY|TOKEN|SECRET|API|URL|WEBHOOK|PASSWORD|PASSWD|CREDENTIAL|ENDPOINT|"
+    r"ANTHROPIC|OPENAI|GOOGLE|GEMINI|GROQ|MISTRAL|XAI|DEEPSEEK|HUGGINGFACE|"
+    r"REPLICATE|PERPLEXITY|COHERE|TOGETHER|FIREWORKS|OPENROUTER|LITELLM|"
+    r"BEDROCK|VERTEX)",
     re.IGNORECASE,
 )
 
@@ -37,14 +42,25 @@ _SYSTEM_ENV = {
     "LOGNAME", "MAIL", "HOSTNAME",
 }
 
+# Each agent: ordered list of candidate skill dirs. The first one
+# that exists wins. If none exist, the first entry is reported as
+# the canonical (not-found) path.
 _AGENT_CANDIDATES = [
-    ("claude-code", "{home}/.claude/skills"),
-    ("cursor", "{home}/.cursor/skills"),
-    ("windsurf", "{home}/.windsurf/skills"),
-    ("gemini", "{home}/.gemini/skills"),
-    ("codex", "{home}/.codex/skills"),
-    ("openclaw", "{home}/openclaw/skills"),
-    ("github-copilot", "{home}/.config/github-copilot"),
+    {"name": "claude-code",     "paths": ["{home}/.claude/skills"]},
+    {"name": "claude-cowork",   "paths": ["{home}/.claude-cowork/skills",
+                                          "{home}/.config/claude-cowork/skills",
+                                          "{home}/.claude/cowork/skills"]},
+    {"name": "cursor",          "paths": ["{home}/.cursor/skills"]},
+    {"name": "windsurf",        "paths": ["{home}/.windsurf/skills"]},
+    {"name": "gemini",          "paths": ["{home}/.gemini/skills"]},
+    {"name": "codex",           "paths": ["{home}/.codex/skills"]},
+    {"name": "openclaw",        "paths": ["{home}/.openclaw/skills",
+                                          "{home}/.openclaw/agents",
+                                          "{home}/openclaw/skills"]},
+    {"name": "hermes",          "paths": ["{home}/.hermes/skills",
+                                          "{home}/.hermes/agents",
+                                          "{home}/.config/hermes/skills"]},
+    {"name": "github-copilot",  "paths": ["{home}/.config/github-copilot"]},
 ]
 
 
@@ -71,31 +87,67 @@ def discover(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_agent_path(agent: dict, home: Path) -> tuple[Path, bool]:
+    """Pick the first existing candidate dir for an agent.
+
+    Returns ``(path, found)``. If none exist, the first candidate is
+    returned with ``found=False`` so callers still have something to
+    show in the proposal.
+    """
+    candidates = [Path(p.format(home=str(home))) for p in agent["paths"]]
+    for path in candidates:
+        if path.exists():
+            return path, True
+    # Fallback: use the first candidate; mark "found" if its parent
+    # exists, which means the agent itself is installed but has no
+    # skills/ subdir yet.
+    first = candidates[0]
+    return first, first.parent.exists()
+
+
 def _discover_agents(home: Path) -> list[dict]:
     out: list[dict] = []
-    for name, template in _AGENT_CANDIDATES:
-        path = Path(template.format(home=str(home)))
+    for agent in _AGENT_CANDIDATES:
+        path, found = _resolve_agent_path(agent, home)
         out.append({
-            "name": name,
+            "name": agent["name"],
             "path": str(path),
-            "found": path.exists() or path.parent.exists(),
+            "found": found,
         })
     return out
 
 
 def _discover_existing_skills(home: Path) -> list[dict]:
+    """Find depth-1 skills under each detected agent dir.
+
+    Convention: ``<agent_dir>/<skill_name>/SKILL.md``. Plugin bundles
+    that nest skills more deeply (e.g.
+    ``<agent_dir>/<plugin>/<skill>/SKILL.md``) are intentionally
+    skipped here — listing them as bare names produces hundreds of
+    duplicates and confuses the proposal output.
+    """
     skills: list[dict] = []
+    seen_paths: set[str] = set()
     for agent in _discover_agents(home):
         agent_dir = Path(agent["path"])
         if not agent_dir.is_dir():
             continue
-        for md in sorted(agent_dir.rglob("SKILL.md")):
+        for child in sorted(agent_dir.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            md = child / "SKILL.md"
+            if not md.is_file():
+                continue
+            md_abs = str(md.resolve())
+            if md_abs in seen_paths:
+                continue
+            seen_paths.add(md_abs)
             try:
                 content = md.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             skills.append({
-                "name": md.parent.name,
+                "name": child.name,
                 "agent": agent["name"],
                 "path": str(md),
                 "has_placeholders": bool(PLACEHOLDER_RE.search(content)),
@@ -121,19 +173,30 @@ def _discover_credentials(home: Path, cwd: Path, env: dict) -> list[dict]:
         seen.add((key, value))
         creds.append({"key": key, "value": value, "source": source, "path": path})
 
-    # .env-style files
-    env_candidates = [
+    # cwd + $HOME .env-style files (project + user-shell creds)
+    base_candidates = [
         cwd / ".env",
         cwd / ".env.local",
         cwd / ".env.production",
         home / ".env",
         home / ".env.local",
     ]
-    for path in env_candidates:
+    for path in base_candidates:
         if not _is_user_file(path):
             continue
+        try:
+            display = str(path.relative_to(home))
+        except ValueError:
+            display = path.name
         for k, v in _parse_env_file(path):
-            _add(k, v, path.name, str(path))
+            _add(k, v, display, str(path))
+
+    # System-wide sweep across well-known AI / agent tool config dirs.
+    # Each dir is scanned for known credential file names; we also walk
+    # one level deep so per-profile configs are picked up.
+    for tool_dir in _ai_tool_dirs(home):
+        for k, v, source, path in _scan_tool_dir(tool_dir, home):
+            _add(k, v, source, path)
 
     # docker-compose.yml — environment: sections
     for name in ("docker-compose.yml", "docker-compose.yaml", "docker-compose.override.yml"):
@@ -189,6 +252,150 @@ def _parse_env_file(path: Path) -> list[tuple[str, str]]:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         out.append((key, value))
+    return out
+
+
+# Well-known AI / agent tool config directories. We scan these
+# system-wide for credential files. New tools can be added freely;
+# misses are silent and cheap.
+_AI_TOOL_HOME_DIRS = [
+    # Direct ~ subdirs
+    ".claude", ".claude-cowork", ".cursor", ".codex", ".openclaw",
+    ".hermes", ".gemini", ".windsurf", ".zed", ".fleet",
+    ".continue", ".aider", ".cody", ".tabnine",
+    ".anthropic", ".openai", ".litellm", ".llm",
+    # XDG ~/.config
+    ".config/anthropic", ".config/openai",
+    ".config/claude", ".config/claude-cowork",
+    ".config/cursor", ".config/codex",
+    ".config/openclaw", ".config/hermes",
+    ".config/gemini", ".config/windsurf", ".config/zed",
+    ".config/continue", ".config/aider", ".config/cody",
+    ".config/litellm", ".config/openrouter", ".config/fabric",
+    ".config/llm", ".config/github-copilot",
+    # macOS Application Support
+    "Library/Application Support/Claude",
+    "Library/Application Support/Anthropic",
+    "Library/Application Support/Cursor",
+    "Library/Application Support/Codex",
+    "Library/Application Support/OpenClaw",
+    "Library/Application Support/Continue",
+    "Library/Application Support/Aider",
+]
+
+# Filenames inside any AI tool dir we'll parse for credentials.
+_CRED_FILE_NAMES = [
+    ".env", ".env.local", ".env.production",
+    "config.env", "auth.env",
+    "credentials", "credentials.json",
+    "credentials.yaml", "credentials.yml",
+    "secrets.json", "secrets.yaml", "secrets.yml",
+    "config.json", "config.yaml", "config.yml",
+    "settings.json", "auth.json", ".auth",
+]
+
+_AGENT_CRED_KEYS = ("secrets", "credentials", "env", "environment", "api_keys", "keys")
+
+
+def _ai_tool_dirs(home: Path) -> list[Path]:
+    return [home / rel for rel in _AI_TOOL_HOME_DIRS]
+
+
+def _scan_tool_dir(tool_dir: Path, home: Path):
+    """Yield credentials from any known cred file in ``tool_dir`` or
+    its immediate subdirs (e.g. ``profiles/default/credentials``)."""
+    if not _is_dir_safe(tool_dir):
+        return
+    candidates: list[Path] = [tool_dir]
+    try:
+        for child in tool_dir.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                candidates.append(child)
+    except OSError:
+        pass
+
+    for cand in candidates:
+        for fname in _CRED_FILE_NAMES:
+            path = cand / fname
+            if not _is_user_file(path):
+                continue
+            try:
+                display = str(path.relative_to(home))
+            except ValueError:
+                display = path.name
+
+            lower = path.name.lower()
+            if lower.endswith((".json",)):
+                pairs = _parse_agent_config(path)
+            elif lower.endswith((".yaml", ".yml")):
+                pairs = _parse_agent_config(path)
+            else:
+                # .env, credentials, settings, auth — line-based
+                pairs = _parse_env_file(path)
+
+            for k, v in pairs:
+                yield k, v, display, str(path)
+
+
+def _is_dir_safe(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
+def _parse_agent_config(path: Path) -> list[tuple[str, str]]:
+    """Pull credential-shaped key/value pairs out of an agent config file.
+
+    Looks for a top-level dict whose key is one of ``secrets``,
+    ``credentials``, ``env``, ``environment``, ``api_keys``, ``keys``,
+    and treats the contents as flat ``KEY: value`` pairs. Also pulls
+    any top-level keys whose names match the credential pattern.
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+
+    if path.suffix == ".json":
+        try:
+            import json as _json
+            data = _json.loads(text)
+        except (ValueError, OSError):
+            return out
+    else:
+        try:
+            data = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return out
+
+    if not isinstance(data, dict):
+        return out
+
+    # Top-level keys that look credential-shaped.
+    for k, v in data.items():
+        if isinstance(v, (str, int, float)) and _looks_credential(str(k)):
+            out.append((str(k), str(v)))
+
+    # Common credential containers.
+    for container in _AGENT_CRED_KEYS:
+        section = data.get(container)
+        if isinstance(section, dict):
+            for k, v in section.items():
+                if v is None:
+                    continue
+                if isinstance(v, (str, int, float, bool)):
+                    out.append((str(k), str(v)))
+        elif isinstance(section, list):
+            for entry in section:
+                if isinstance(entry, str) and "=" in entry:
+                    k, v = entry.split("=", 1)
+                    out.append((k.strip(), v.strip()))
+                elif isinstance(entry, dict) and "name" in entry:
+                    val = entry.get("value")
+                    if val is not None:
+                        out.append((str(entry["name"]), str(val)))
     return out
 
 

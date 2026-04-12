@@ -174,3 +174,99 @@ def test_discover_returns_full_shape(tmp_path):
     assert set(result.keys()) == {"agents", "existing_skills", "credentials", "git"}
     assert isinstance(result["git"], dict)
     assert "gh_authenticated" in result["git"]
+
+
+def test_existing_skills_dedup_and_depth_one(tmp_path):
+    """Plugin bundles must not produce 9x duplicates."""
+    home = tmp_path / "home"
+    skills_dir = home / ".claude" / "skills"
+    # Top-level skill — should be picked up.
+    (skills_dir / "energy").mkdir(parents=True)
+    (skills_dir / "energy" / "SKILL.md").write_text("hi")
+    # A plugin bundle that nests another SKILL.md two levels deep —
+    # the depth-1 walker should ignore it.
+    (skills_dir / "plugin-bundle" / "nested-skill").mkdir(parents=True)
+    (skills_dir / "plugin-bundle" / "nested-skill" / "SKILL.md").write_text("hi")
+    # The plugin-bundle dir itself has no SKILL.md → not a skill.
+    result = discover(home=home, cwd=tmp_path, env={})
+    names = [s["name"] for s in result["existing_skills"]]
+    assert names == ["energy"]
+
+
+def test_openclaw_skills_under_dotopenclaw(tmp_path):
+    home = tmp_path / "home"
+    skills = home / ".openclaw" / "skills" / "diagnose"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text("Use ${{GATEWAY_KEY}}")
+    result = discover(home=home, cwd=tmp_path, env={})
+    agents = {a["name"]: a for a in result["agents"]}
+    assert agents["openclaw"]["found"] is True
+    assert "diagnose" in [s["name"] for s in result["existing_skills"]]
+
+
+def test_hermes_and_cowork_listed(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result = discover(home=home, cwd=tmp_path, env={})
+    names = [a["name"] for a in result["agents"]]
+    assert "claude-cowork" in names
+    assert "hermes" in names
+    assert "openclaw" in names
+
+
+def test_credentials_from_openclaw_env(tmp_path):
+    home = tmp_path / "home"
+    openclaw = home / ".openclaw"
+    openclaw.mkdir(parents=True)
+    (openclaw / ".env").write_text("FEISHU_WEBHOOK=https://feishu.x/webhook\n")
+    result = discover(home=home, cwd=tmp_path, env={})
+    by_key = {c["key"]: c for c in result["credentials"]}
+    assert "FEISHU_WEBHOOK" in by_key
+    assert ".openclaw/.env" in by_key["FEISHU_WEBHOOK"]["source"]
+
+
+def test_credentials_from_anthropic_config_yaml(tmp_path):
+    home = tmp_path / "home"
+    cfg_dir = home / ".config" / "anthropic"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.yaml").write_text(
+        "secrets:\n  ANTHROPIC_API_KEY: sk-ant-fake-1234567890123456789012345678901234567890\n"
+    )
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "ANTHROPIC_API_KEY" in keys
+
+
+def test_credentials_descend_one_level_into_subdirs(tmp_path):
+    """Walker descends one level past each AI tool dir so per-profile
+    config dirs (e.g. ``~/.openclaw/default/credentials``) are caught."""
+    home = tmp_path / "home"
+    sub = home / ".openclaw" / "default"
+    sub.mkdir(parents=True)
+    (sub / "credentials").write_text("API_KEY=sk-from-profile\n")
+    result = discover(home=home, cwd=tmp_path, env={})
+    keys = {c["key"] for c in result["credentials"]}
+    assert "API_KEY" in keys
+
+
+def test_credentials_pattern_catches_ai_provider_names(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "ANTHROPIC_API_KEY": "sk-ant-xyz",
+        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "OPENAI_API_KEY": "sk-xyz",
+        "GROQ_API_KEY": "gsk_xyz",
+        "MISTRAL_API_KEY": "mst-xyz",
+        "STEPONEAI_API_KEY": "step-xyz",
+        "PATH": "/usr/bin",
+    }
+    result = discover(home=home, cwd=tmp_path, env=env)
+    keys = {c["key"] for c in result["credentials"]}
+    assert "ANTHROPIC_API_KEY" in keys
+    assert "ANTHROPIC_BASE_URL" in keys
+    assert "OPENAI_API_KEY" in keys
+    assert "GROQ_API_KEY" in keys
+    assert "MISTRAL_API_KEY" in keys
+    assert "STEPONEAI_API_KEY" in keys
+    assert "PATH" not in keys

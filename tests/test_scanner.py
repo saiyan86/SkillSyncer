@@ -49,6 +49,30 @@ def test_detects_slack_token():
     assert any(d["pattern_label"] == "Slack token" for d in dets)
 
 
+def test_detects_anthropic_api_key():
+    key = "sk-ant-" + "A" * 50
+    dets = scan_content(f"key={key}", {})
+    assert any(d["pattern_label"] == "Anthropic API key" for d in dets)
+
+
+def test_detects_google_api_key():
+    key = "AIza" + "A" * 35
+    dets = scan_content(f"key={key}", {})
+    assert any(d["pattern_label"] == "Google API key" for d in dets)
+
+
+def test_detects_groq_api_key():
+    key = "gsk_" + "A" * 50
+    dets = scan_content(f"key={key}", {})
+    assert any(d["pattern_label"] == "Groq API key" for d in dets)
+
+
+def test_detects_huggingface_token():
+    key = "hf_" + "A" * 35
+    dets = scan_content(f"key={key}", {})
+    assert any(d["pattern_label"] == "HuggingFace token" for d in dets)
+
+
 def test_placeholder_excluded_from_detection():
     # Identity literal lives inside a placeholder — must NOT be flagged.
     secrets = {"GATEWAY_KEY": "sk-abcdefghij1234567890"}
