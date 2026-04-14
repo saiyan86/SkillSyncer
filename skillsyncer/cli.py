@@ -1732,12 +1732,106 @@ def cmd_report_clean(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# dev — dangerous helpers for local testing
+# ---------------------------------------------------------------------------
+
+
+def cmd_dev_purge(args: argparse.Namespace) -> int:
+    """Wipe all tracked content from a source repo and commit.
+
+    This is a dev-only escape hatch for resetting a test repo to a
+    clean state before re-running ``skillsyncer publish --all``.  It
+    removes every tracked file, commits the result, and leaves the
+    local clone intact so the next publish can repopulate it.
+
+    It will NOT push — the user must push manually, as with publish.
+    """
+    config = read_config()
+    target, err = _resolve_publish_target(config, getattr(args, "source", None))
+    if err:
+        _err(f"[skillsyncer] {err}")
+        return 2
+
+    target_path = Path(target.get("path") or "").expanduser()
+    if not target_path.is_dir():
+        _err(f"[skillsyncer] source dir doesn't exist: {target_path}")
+        return 2
+    if not (target_path / ".git").exists():
+        _err(f"[skillsyncer] not a git repo: {target_path}")
+        return 2
+
+    # Count tracked files so the warning is concrete.
+    ls = subprocess.run(
+        ["git", "-C", str(target_path), "ls-files"],
+        capture_output=True, text=True, check=False,
+    )
+    tracked = [f for f in ls.stdout.splitlines() if f.strip()]
+    if not tracked:
+        _out("[skillsyncer] nothing to purge — repo already has no tracked files.")
+        return 0
+
+    # ── Danger warning ────────────────────────────────────────────────
+    _err("")
+    _err(C.yellow("  ══════════════════════════════════════════════════"))
+    _err(C.yellow(f"  ⚠️   DEV PURGE — {C.bold(target['name'])}"))
+    _err(C.yellow("  ══════════════════════════════════════════════════"))
+    _err("")
+    _err(f"  Repo:  {target_path}")
+    _err(f"  Files: {len(tracked)} tracked file(s) will be permanently deleted")
+    _err(f"  A git commit will record the deletion.")
+    _err("")
+    _err("  This only affects the local clone — nothing is pushed.")
+    _err("  But once committed, recovery requires the remote or a reflog.")
+    _err("")
+
+    if args.yes:
+        confirm = "PURGE"
+    elif sys.stdin.isatty():
+        try:
+            confirm = input("  Type PURGE to confirm (anything else cancels): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            _out("\n  Cancelled.")
+            return 0
+    else:
+        _err("  Non-interactive shell — pass --yes to skip this prompt.")
+        return 2
+
+    if confirm != "PURGE":
+        _out("  Cancelled.")
+        return 0
+
+    try:
+        subprocess.run(
+            ["git", "-C", str(target_path), "rm", "-rf", "--quiet", "."],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(target_path), "commit",
+             "-m", "Dev purge via SkillSyncer --dev purge"],
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        _err(f"[skillsyncer] git error: {exc}")
+        return 2
+
+    _out("")
+    _out(_ok(f"Purged {len(tracked)} file(s) from {C.bold(target['name'])}"))
+    _out(C.dim("  Repo is now empty. Run `skillsyncer publish --all` to repopulate."))
+    _out(C.dim(f"  Push when ready:  git -C {target_path} push"))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skillsyncer",
         description="SkillSyncer \u2014 agent skills that sync, fill, and protect themselves.",
     )
     parser.add_argument("--version", action="version", version=f"skillsyncer {__version__}")
+    parser.add_argument(
+        "--dev", action="store_true",
+        help="Enable dev-mode commands (destructive, for local testing only).",
+    )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
@@ -1911,6 +2005,36 @@ def _build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--days", type=int, default=30)
     rp.set_defaults(func=cmd_report_clean)
 
+    # ------------------------------------------------------------------
+    # dev — dangerous commands for local dev/testing only.
+    # Hidden from normal --help; only reachable via `skillsyncer --dev`.
+    # ------------------------------------------------------------------
+    p_dev = sub.add_parser(
+        "dev",
+        help=argparse.SUPPRESS,
+        description=(
+            "Dev-mode commands. Destructive. "
+            "Always require explicit confirmation. "
+            "Never use in production."
+        ),
+    )
+    dev_sub = p_dev.add_subparsers(dest="dev_command", metavar="DEV_COMMAND")
+    dev_sub.required = True
+
+    dp = dev_sub.add_parser(
+        "purge",
+        help="Wipe all content from a registered source repo and commit.",
+    )
+    dp.add_argument(
+        "--source", default=None,
+        help="Which source repo to purge (only needed when more than one is registered).",
+    )
+    dp.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt (dangerous — use only in scripts).",
+    )
+    dp.set_defaults(func=cmd_dev_purge)
+
     return parser
 
 
@@ -1918,6 +2042,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     C.init()
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Gate: dev-group commands require an explicit --dev flag so they
+    # can't be triggered by accident in production environments.
+    if getattr(args, "dev_command", None) and not getattr(args, "dev", False):
+        parser.error(
+            "`skillsyncer dev` commands are development-only.\n"
+            "Re-run with the --dev flag:  skillsyncer --dev dev purge"
+        )
+
     rc = args.func(args)
     if rc:
         sys.exit(rc)
