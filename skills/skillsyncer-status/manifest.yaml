@@ -1,0 +1,15 @@
+name: skillsyncer-status
+version: 0.1.0
+description: >
+  Answer the question "what skills do I have and what shape are
+  they in". Pull structured data from `skillsyncer status`,
+  `skillsyncer skills`, and `skillsyncer doctor` and present it
+  conversationally. Offer next actions.
+requires:
+  secrets: []
+triggers:
+  - User says "what skills do I have" / "show me my SkillSyncer state"
+    / "status" / "skill inventory".
+  - User says "is everything working".
+parameters:
+  # Status takes no parameters — it always surveys the whole system.

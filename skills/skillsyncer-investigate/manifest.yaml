@@ -1,0 +1,31 @@
+name: skillsyncer-investigate
+version: 0.1.0
+description: >
+  A parameterized investigation skill — the /investigate pattern
+  applied to a user's SkillSyncer state. Point it at a TARGET
+  (drift, secrets, sources, skills, hooks) and ask a QUESTION;
+  it reads the relevant deterministic outputs, diarizes, and
+  produces a structured brief with a recommendation.
+requires:
+  secrets: []
+triggers:
+  - User asks "why is X not working" / "something feels off"
+    / "audit my setup" / "what changed since yesterday".
+  - Drift detected and user asks for an explanation.
+parameters:
+  - name: TARGET
+    required: true
+    description: >
+      One of: `drift`, `secrets`, `sources`, `skills`, `hooks`,
+      `reports`, `all`. Tells the investigator which corner of
+      the system to focus on.
+  - name: QUESTION
+    required: true
+    description: >
+      A natural-language question. Example:
+      "why do the same secrets keep showing up as unresolved?"
+  - name: WINDOW
+    required: false
+    description: >
+      Time window for historical reports. Example: `7d`, `24h`.
+      Default: all reports still on disk.

@@ -1,0 +1,21 @@
+name: skillsyncer-fill
+version: 0.1.0
+description: >
+  Primary filler on pull. Given one or more skills with unfilled
+  ${{...}} placeholders, investigate local sources (env, .env files,
+  agent configs, MCP servers) BEFORE asking the user. Confirm each
+  candidate with the user before saving. Cascade fill across skills.
+  Never block — if the user defers, move on.
+requires:
+  secrets: []
+triggers:
+  - "A loaded skill contains ${{KEY}} placeholders that aren't filled."
+  - "`skillsyncer render` just exited 1 with 'some skills need credentials'."
+  - "User says 'fill in my skills' / 'resolve missing secrets'."
+  - "A fill report at ~/.skillsyncer/reports/fill-*.json has `partial` status."
+parameters:
+  - name: report_path
+    required: false
+    description: >
+      Path to a fill report JSON. If omitted, read the latest via
+      `skillsyncer report latest --type=fill`.

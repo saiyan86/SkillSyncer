@@ -1,0 +1,22 @@
+name: skillsyncer-improve
+version: 0.1.0
+description: >
+  The learning loop. Read recent SkillSyncer reports (guard and fill),
+  diarize recurring patterns, propose and write back rules into
+  config.yaml (allow_patterns) and identity.yaml (missing keys) so
+  future runs stop tripping on the same thing. Run after each
+  batch of pushes / pulls to let the system get better.
+requires:
+  secrets: []
+triggers:
+  - User says "improve my SkillSyncer setup" / "stop the same
+    things from breaking".
+  - Cron — run nightly to keep the system healthy.
+  - End of a working session, before tooling-down.
+parameters:
+  - name: WINDOW
+    required: false
+    description: Time window for reports. Default `7d`.
+  - name: DRY_RUN
+    required: false
+    description: If `true`, print proposed changes without writing.

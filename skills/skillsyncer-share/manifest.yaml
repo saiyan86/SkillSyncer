@@ -1,0 +1,20 @@
+name: skillsyncer-share
+version: 0.1.0
+description: >
+  Help the user publish one or more local skills to a source repo
+  via `skillsyncer publish`. Handles the single-source auto-pick,
+  the picker UX, the pre-flight scan (and the follow-up to
+  guard-assist on detection), and the final `git push` with the
+  pre-push hook as the security gate.
+requires:
+  secrets: []
+triggers:
+  - User says "share this skill" / "publish my skill" / "push to our skills repo".
+  - User finishes editing a SKILL.md in an agent dir and asks what's next.
+parameters:
+  - name: skill
+    required: false
+    description: Which skill to publish. If omitted, run the interactive picker.
+  - name: source
+    required: false
+    description: "Which registered source to publish into. Default: the only one."

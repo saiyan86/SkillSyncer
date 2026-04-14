@@ -1,0 +1,21 @@
+name: skillsyncer-report
+version: 0.1.0
+description: >
+  Read the latest (or a specified) SkillSyncer report and present
+  it to the user in plain English. Reports come from the
+  deterministic layer — guard reports after pushes, fill reports
+  after pulls — and are structured JSON the user doesn't want to
+  read themselves.
+requires:
+  secrets: []
+triggers:
+  - "`git push` just finished (pass or fail) and a guard report exists."
+  - "`git pull` just finished and a fill report exists."
+  - "User says 'read the latest report' / 'what happened on that push'."
+parameters:
+  - name: type
+    required: false
+    description: "One of `guard` or `fill`. Default: latest of any type."
+  - name: path
+    required: false
+    description: "Explicit report path. Overrides `type`."

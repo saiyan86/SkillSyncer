@@ -1,0 +1,17 @@
+name: skillsyncer-onboard
+version: 0.1.0
+description: >
+  First-time setup for a user who just encountered SkillSyncer —
+  either directly (`skillsyncer init`) or via a skill preamble
+  bootstrapping the install. Runs the consent-aware discovery
+  flow, writes identity.yaml + config.yaml, renders any skills
+  the user already has, and hands off to FILL for anything that
+  still needs credentials.
+requires:
+  secrets: []
+triggers:
+  - "User invokes `skillsyncer init` for the first time."
+  - "A loaded skill has a `<!-- skillsyncer:require -->` preamble and SkillSyncer is not yet installed on this machine."
+  - "User says 'set up skillsyncer' or 'onboard me'."
+parameters:
+  # Onboard is unparameterized — it always runs the same flow.

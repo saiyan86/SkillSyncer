@@ -108,38 +108,94 @@ a Git URL. They pulled a project and said "yes" once.
 
 ## How it works
 
-SkillSyncer has two layers, and the boundary between them is the
-whole point.
+**Thin harness, fat skills.** SkillSyncer is three layers, and the
+boundaries between them are the whole point.
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  Agent Layer (operator skill)                          │
-│    • Conversational secret filling                     │
-│    • Onboarding guidance                               │
-│    • "Share this skill" workflow                       │
-│    • Helpful — but not security-critical               │
-├────────────────────────────────────────────────────────┤
-│  Deterministic Layer (git hooks + CLI, pure regex)     │
-│    • pre-push:   regex scan, hard block                │
-│    • post-merge: render ${{}} from identity.yaml       │
-│    • 100% accuracy. No AI. No exceptions.              │
-└────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  FAT SKILLS (skills/skillsyncer-*/SKILL.md)                  │
+│    onboard · fill · guard-assist · share · report · status   │
+│    investigate · improve                                     │
+│                                                              │
+│  Markdown. Each one is a standalone procedure with explicit  │
+│  parameters, triggers, and CAN/CANNOT rules. Judgment lives  │
+│  here. This is where ≈90% of the value is.                   │
+├──────────────────────────────────────────────────────────────┤
+│  THIN RESOLVER (operator/SKILL.md)                           │
+│    ~80 lines. A routing table from user intent to skill.     │
+│    "User said publish → load skillsyncer-share"              │
+├──────────────────────────────────────────────────────────────┤
+│  THIN HARNESS (skillsyncer CLI, ~1500 lines of Python)       │
+│    • pre-push:   regex scan, hard block                      │
+│    • post-merge: render ${{}} from identity.yaml             │
+│    • publish:    commit → pre-flight scan → git hook final   │
+│    • sync / doctor / status / secret / hooks / sources / … │
+│                                                              │
+│  Pure deterministic. No AI. No model calls. JSON in, text    │
+│  out. 100% accuracy.                                         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**The deterministic layer is the security boundary.** It is
-traditional software. It does not guess. It does not hallucinate. It
-either passes or blocks. Every secret it knows about — every
-identity value, every regex pattern — is checked the same way every
-time.
+**The harness is the security boundary.** It is traditional
+software. It does not guess. It does not hallucinate. It either
+passes or blocks. Every secret it knows about — every identity
+value, every regex pattern — is checked the same way every time.
 
-**The agent layer is the convenience layer.** It reads JSON reports
-the deterministic layer writes. It helps you name placeholders. It
-fills credentials it can find. It can be wrong, and that's fine —
-because the deterministic layer always runs after.
+**The fat skills are the convenience layer.** Each is a markdown
+document encoding process, judgment, and rules. They read JSON
+reports the harness writes. They invoke harness commands to make
+any mutation. They can be wrong about what to do next, and that's
+fine — because the harness always runs after.
 
-This split is why SkillSyncer is safe to trust. Agents are great at
-UX. They're terrible at being the last line of defense. SkillSyncer
-gives each layer the job it's good at.
+**The resolver is a routing table.** When the user says "fill my
+skills", the resolver doesn't fill anything itself. It loads
+`skills/skillsyncer-fill/SKILL.md` and lets that take over. When
+the user says "publish", it loads `skills/skillsyncer-share/SKILL.md`.
+The resolver is eight lines of table plus a few rules. Zero
+business logic.
+
+This split is why SkillSyncer is safe to trust. Agents are great
+at UX. They're terrible at being the last line of defense.
+SkillSyncer gives each layer the job it's good at — and puts the
+hardest layer (the agent procedures) in markdown files you can
+read, edit, version, and share like code.
+
+### The eight fat skills
+
+Read any one of these on its own and you'll know exactly what the
+agent should do in that situation:
+
+| Skill | What it does |
+| --- | --- |
+| [`skillsyncer-onboard`](skills/skillsyncer-onboard/SKILL.md) | First-time setup. Install, consent, scan, render. |
+| [`skillsyncer-fill`](skills/skillsyncer-fill/SKILL.md) | Primary filler on pull. Investigate before asking. |
+| [`skillsyncer-guard-assist`](skills/skillsyncer-guard-assist/SKILL.md) | Resolve blocked pushes the hook couldn't auto-fix. |
+| [`skillsyncer-share`](skills/skillsyncer-share/SKILL.md) | Publish local skills into a registered source repo. |
+| [`skillsyncer-report`](skills/skillsyncer-report/SKILL.md) | Read a guard/fill report; narrate it as prose. |
+| [`skillsyncer-status`](skills/skillsyncer-status/SKILL.md) | Answer "what skills do I have, what shape are they in". |
+| [`skillsyncer-investigate`](skills/skillsyncer-investigate/SKILL.md) | Structured investigation of your setup. Takes `TARGET` + `QUESTION`. |
+| [`skillsyncer-improve`](skills/skillsyncer-improve/SKILL.md) | Learning loop. Read recent reports, propose config rewrites. |
+
+Every skill has a `manifest.yaml` describing its triggers and
+parameters. Every skill carries the SkillSyncer preamble, so any
+agent that loads one knows how to install SkillSyncer and run it.
+They're the same shape as the user skills SkillSyncer is designed
+to manage — the project eats its own dog food.
+
+### Why this matters — Steve Yegge's 100x
+
+From "The harness is the product" (2026): *"The difference [between
+the 2x and 100x agent users] isn't intelligence. It's architecture.
+…Fat skills sit on top. A thin CLI harness sits in the middle.
+Your application sits on the bottom. The principle is directional.
+Push intelligence up into skills. Push execution down into
+deterministic tooling. Keep the harness thin."*
+
+That is literally SkillSyncer's architecture. The harness doesn't
+get smarter when Claude gets smarter — the **skills** do. Every
+model improvement automatically lifts the judgment in every fat
+skill without touching the deterministic layer. The CLI stays
+perfectly reliable; the agent gets better for free.
 
 ### The placeholder format
 
@@ -766,27 +822,41 @@ the boundary is the file format. That's the whole system.
 
 ```
 skillsyncer/
-├── skillsyncer/
-│   ├── patterns.py       # built-in secret patterns
-│   ├── scanner.py        # regex + identity cross-reference
-│   ├── renderer.py       # ${{}} → values
-│   ├── filler.py         # auto-fill from env / cascade / defaults
-│   ├── guarder.py        # auto-fix detected secrets in files
-│   ├── discoverer.py     # environment scanning for init
-│   ├── reporter.py       # JSON report lifecycle
-│   ├── identity.py       # identity.yaml read/write
-│   ├── config.py         # config.yaml read/write
-│   ├── state.py          # drift detection
-│   ├── hooks.py          # idempotent git hook install
-│   ├── cli.py            # argparse commands (stdlib only)
-│   └── templates/        # bundled inside the package so they ship
-│       ├── pre-push.sh   #   with every install (uv/pipx/pip)
+├── skillsyncer/              # THIN HARNESS — pure-Python CLI
+│   ├── patterns.py           # built-in secret patterns
+│   ├── scanner.py            # regex + identity cross-reference
+│   ├── renderer.py           # ${{}} → values
+│   ├── filler.py             # auto-fill from env / cascade / defaults
+│   ├── guarder.py            # auto-fix detected secrets in files
+│   ├── discoverer.py         # environment scanning for init
+│   ├── reporter.py           # JSON report lifecycle
+│   ├── identity.py           # identity.yaml read/write
+│   ├── config.py             # config.yaml read/write
+│   ├── state.py              # drift detection
+│   ├── hooks.py              # idempotent git hook install
+│   ├── cli.py                # argparse commands (stdlib only)
+│   └── templates/            # bundled inside the package so they
+│       ├── pre-push.sh       #   ship with every install
 │       ├── post-merge.sh
 │       └── preamble.md
+├── skills/                   # FAT SKILLS — eight standalone procedures
+│   ├── INDEX.md              # list of all fat skills + parameters
+│   ├── skillsyncer-onboard/
+│   │   ├── manifest.yaml
+│   │   └── SKILL.md
+│   ├── skillsyncer-fill/
+│   ├── skillsyncer-guard-assist/
+│   ├── skillsyncer-share/
+│   ├── skillsyncer-report/
+│   ├── skillsyncer-status/
+│   ├── skillsyncer-investigate/
+│   └── skillsyncer-improve/
 ├── operator/
-│   └── SKILL.md          # the agent operator skill
-├── tests/                # 95 tests, all green
-├── install.sh
+│   └── SKILL.md              # THIN RESOLVER — ~80 lines; routes
+│                             #   user intent to one fat skill
+├── tests/                    # 165 tests, all green
+├── install.sh / install.ps1
+├── uninstall.sh / uninstall.ps1
 └── pyproject.toml
 ```
 
