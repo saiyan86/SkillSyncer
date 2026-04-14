@@ -49,5 +49,5 @@ fi
 echo ""
 echo "✓ SkillSyncer installed"
 echo ""
-echo "Run:  skillsyncer init"
+echo "Run:  skillsyncer onboard"
 echo ""

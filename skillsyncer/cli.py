@@ -451,6 +451,229 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# onboard — interactive setup wizard
+# ---------------------------------------------------------------------------
+
+_BOX_H = "\u2500"           # ─  (light horizontal, for wizard step dividers)
+
+
+def _onboard_step(n: int, total: int, title: str) -> None:
+    """Print a coloured step header: ─── Step n/total · title ─────────────"""
+    label = f" Step {n}/{total} \u00b7 {title} "
+    left = 3
+    right = max(0, 58 - left - len(label))
+    _out("")
+    _out("  " + C.bold(C.cyan(_BOX_H * left + label + _BOX_H * right)))
+
+
+def cmd_onboard(_args: argparse.Namespace) -> int:
+    """Interactive setup wizard: init → source repo → render."""
+
+    home = paths.home()
+    already_init = (home / "config.yaml").exists()
+    TOTAL_STEPS = 3
+
+    # ── Welcome ───────────────────────────────────────────────────────────────
+    _print_banner()
+    if already_init:
+        _out(C.dim(f"  Re-running onboarding. Existing config at {home}"))
+        _out(C.dim("  Nothing is wiped \u2014 we\u2019ll update what\u2019s needed."))
+    else:
+        _out(C.bold("  Let\u2019s get you set up in three steps."))
+    _out("")
+
+    # ── Step 1: Credential scan ───────────────────────────────────────────────
+    _onboard_step(1, TOTAL_STEPS, "Scan your environment")
+
+    home.mkdir(parents=True, exist_ok=True)
+
+    with _Spinner("probing your environment"):
+        preview = discover(scan_credentials=False)
+
+    scan_creds = _consent_prompt(preview["credential_scan_plan"])
+
+    with _Spinner("reading credentials" if scan_creds else "initialising"):
+        proposal = discover(scan_credentials=scan_creds)
+
+    config = read_config()
+    config.setdefault("sources", [])
+    if not config.get("targets"):
+        config["targets"] = [
+            {"name": a["name"], "path": a["path"], "found": a["found"]}
+            for a in proposal["agents"] if a["found"]
+        ] or detect_targets()
+    write_config(config)
+
+    if not paths.identity_path().exists():
+        write_identity({"secrets": {}, "overrides": {}})
+
+    # Discovery summary
+    found_agents = [a for a in proposal["agents"] if a["found"]]
+    _out("")
+    if found_agents:
+        _out(_section("Agents") + C.dim(f"  ({len(found_agents)})"))
+        for a in found_agents:
+            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(a['name']):<22} {C.dim(a['path'])}")
+    else:
+        _out(_section("Agents") + C.dim("  (none detected)"))
+
+    if proposal["existing_skills"]:
+        SKILLS_PER_AGENT = 6
+        by_agent_skills: dict[str, list[dict]] = {}
+        for s in proposal["existing_skills"]:
+            by_agent_skills.setdefault(s["agent"], []).append(s)
+        _out("")
+        _out(_section("Skills") + C.dim(f"  ({len(proposal['existing_skills'])})"))
+        for agent_name in sorted(by_agent_skills):
+            group = by_agent_skills[agent_name]
+            _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
+            for s in group[:SKILLS_PER_AGENT]:
+                tags = []
+                if s["has_placeholders"]:
+                    tags.append(C.cyan("placeholders"))
+                if s["has_hardcoded_secrets"]:
+                    tags.append(C.red("hardcoded-secret"))
+                tail = f"  [{', '.join(tags)}]" if tags else ""
+                _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}{tail}")
+            if len(group) > SKILLS_PER_AGENT:
+                _out(C.dim(f"    {GLYPH_BULLET} \u2026 and {len(group) - SKILLS_PER_AGENT} more"))
+
+    if proposal.get("credential_scan_performed") and proposal["credentials"]:
+        by_cred_key: dict[str, list[dict]] = {}
+        for c in proposal["credentials"]:
+            by_cred_key.setdefault(c["key"], []).append(c)
+        _out("")
+        _out(_section("Credentials") + C.dim(f"  ({len(by_cred_key)} found)"))
+        for key in sorted(by_cred_key):
+            cands = by_cred_key[key]
+            src = sorted({c["source"] for c in cands})[0]
+            _out(f"  {C.green(GLYPH_CHECK)}  {C.bold(key):<32} {C.dim(src)}")
+    elif not proposal.get("credential_scan_performed"):
+        _out("")
+        _out(C.dim("  Credential scan skipped. Run `skillsyncer init --yes` to scan later."))
+
+    # ── Step 2: Source repo ────────────────────────────────────────────────────
+    _onboard_step(2, TOTAL_STEPS, "Connect a skills repo (optional)")
+
+    config = read_config()
+    existing_sources = config.get("sources") or []
+    gh_ok = bool(proposal.get("git", {}).get("gh_authenticated"))
+
+    _out("")
+    if existing_sources:
+        _out(C.dim("  Already connected: " + ", ".join(s["name"] for s in existing_sources)))
+        _out(C.dim("  You can add another or skip."))
+    else:
+        _out("  A Git repo lets you sync skills across machines and with teammates.")
+    _out("")
+
+    choices: list[tuple[str, str]] = []
+    if gh_ok:
+        choices.append(("a", "Create a new private GitHub repo"))
+    choices.append(("b", "Use an existing repo (paste URL)"))
+    choices.append(("s", "Skip for now"))
+
+    for key, label in choices:
+        marker = C.bold(C.yellow(f"[{key.upper()}]"))
+        _out(f"  {marker}  {label}")
+    _out("")
+
+    if not sys.stdin.isatty():
+        _out(C.dim("  (non-interactive \u2014 skipping source repo setup)"))
+        source_choice = "s"
+    else:
+        valid_keys = {k for k, _ in choices}
+        while True:
+            keys_hint = "/".join(k.upper() for k, _ in choices)
+            try:
+                raw = input(
+                    f"  {C.bold(C.yellow(GLYPH_PROMPT))}  Choice [{keys_hint}]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                _out("")
+                raw = "s"
+            if not raw:
+                source_choice = "s"
+                break
+            if raw in valid_keys:
+                source_choice = raw
+                break
+            _out(f"  Please enter one of: {keys_hint}")
+
+    if source_choice == "a" and gh_ok:
+        _out("")
+        try:
+            raw_name = input(
+                f"  {C.bold(C.yellow(GLYPH_PROMPT))}  Repo name [agent-skills]: "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            raw_name = ""
+        repo_name = raw_name or "agent-skills"
+
+        with _Spinner(f"creating github.com/{repo_name}"):
+            gh_result = subprocess.run(
+                ["gh", "repo", "create", repo_name, "--private"],
+                capture_output=True, text=True, check=False,
+            )
+
+        if gh_result.returncode != 0:
+            _out(C.red(f"  {GLYPH_CROSS} gh repo create failed: {gh_result.stderr.strip()}"))
+            _out(C.dim("  Run `skillsyncer add <url>` manually after creating the repo."))
+        else:
+            repo_url = gh_result.stdout.strip()
+            # gh outputs the HTTPS URL; prefer SSH
+            if repo_url.startswith("https://github.com/"):
+                repo_path = repo_url.removeprefix("https://github.com/")
+                repo_url = f"git@github.com:{repo_path}.git"
+            _out(C.dim(f"  {GLYPH_ARROW} {repo_url}"))
+            add_args = argparse.Namespace(url=repo_url, name=None, no_clone=False)
+            cmd_add(add_args)
+
+    elif source_choice == "b":
+        _out("")
+        try:
+            repo_url = input(
+                f"  {C.bold(C.yellow(GLYPH_PROMPT))}  Repo URL: "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            repo_url = ""
+        if repo_url:
+            add_args = argparse.Namespace(url=repo_url, name=None, no_clone=False)
+            cmd_add(add_args)
+        else:
+            _out(C.dim("  No URL entered \u2014 skipped."))
+
+    else:
+        _out(C.dim("  Skipped. Run `skillsyncer add <url>` whenever you\u2019re ready."))
+
+    # ── Step 3: Render ─────────────────────────────────────────────────────────
+    _onboard_step(3, TOTAL_STEPS, "Hydrate placeholders into your agent dirs")
+
+    config = read_config()
+    if not config.get("sources"):
+        _out("")
+        _out(C.dim("  No source repos registered \u2014 nothing to render yet."))
+        _out(C.dim("  Run `skillsyncer render` after adding a source."))
+    else:
+        render_args = argparse.Namespace(report_path=None)
+        cmd_render(render_args)
+
+    # ── Done ───────────────────────────────────────────────────────────────────
+    done_text = f"  {C.green(GLYPH_CHECK)}  {C.bold('Onboarding complete')}"
+    inner_width = 56
+    _out("")
+    _out(C.cyan("  " + BOX_TL + _BOX_H * inner_width + BOX_TR))
+    _out(C.cyan("  " + BOX_V) + done_text + C.cyan(BOX_V))
+    _out(C.cyan("  " + BOX_BL + _BOX_H * inner_width + BOX_BR))
+    _out("")
+    _out(C.dim("  skillsyncer status   \u2014 health check"))
+    _out(C.dim("  skillsyncer skills   \u2014 list installed skills"))
+    _out(C.dim("  skillsyncer publish  \u2014 share a skill upstream"))
+    _out("")
+    return 0
+
+
 def cmd_add(args: argparse.Namespace) -> int:
     url = args.url
     name = args.name
@@ -1836,6 +2059,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.required = True
 
     # init
+    # onboard — interactive wizard (preferred first-run path)
+    p = sub.add_parser("onboard", help="Interactive setup wizard: scan → source repo → render.")
+    p.set_defaults(func=cmd_onboard)
+
+    # init (headless / agent path)
     p = sub.add_parser("init", help="One-time setup: scan environment, write config.")
     p.add_argument("--json", dest="as_json", action="store_true",
                    help="Print discovery result as JSON (no writes).")
