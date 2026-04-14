@@ -1161,9 +1161,9 @@ def cmd_publish(args: argparse.Namespace) -> int:
         copied.append(skill)
         _out(f"  \u2713 {skill['name']:<28} (from {skill['agent']})")
 
-    # Pre-flight scan: warn if anything we just copied contains a
-    # secret. The pre-push hook will catch it on push too — this is
-    # just early feedback so the user can clean up before commit.
+    # Pre-flight scan + auto-guard: scan every copied file for hardcoded
+    # secrets. If the identity has matching values, replace them in-place
+    # with ${{KEY}} placeholders before committing — no manual step needed.
     identity = read_identity()
     secrets = identity.get("secrets") or {}
     detections: list[dict] = []
@@ -1172,15 +1172,44 @@ def cmd_publish(args: argparse.Namespace) -> int:
         for f, _ in _iter_skill_files(dst_dir):
             detections.extend(scan_file(f, secrets))
 
+    auto_fixed: list[dict] = []
+    still_dirty: list[dict] = []
     if detections:
-        _err(f"\n[skillsyncer] pre-flight scan found {len(detections)} potential secret(s):")
-        for d in detections:
+        if secrets:
+            # Auto-apply guard_fix across the target path (it works file-by-file).
+            fixes = guard_fix(str(target_path), identity, detections)
+            auto_fixed = [fx for fx in fixes if fx.get("status") == "fixed"]
+            unresolved = [fx for fx in fixes if fx.get("status") != "fixed"]
+            # Re-scan only the files that had unresolved fixes to confirm.
+            unresolved_files = {fx["file"] for fx in unresolved if fx.get("file")}
+            for skill in copied:
+                dst_dir = target_path / skill["name"]
+                for f, _ in _iter_skill_files(dst_dir):
+                    if str(f) in unresolved_files:
+                        still_dirty.extend(scan_file(f, secrets))
+        else:
+            # No credentials in identity — can't auto-fix anything.
+            still_dirty = detections
+
+    if auto_fixed:
+        _out(f"\n[skillsyncer] auto-shielded {len(auto_fixed)} secret(s) → placeholders:")
+        shown: set[str] = set()
+        for fx in auto_fixed:
+            key = fx.get("identity_key", "?")
+            if key not in shown:
+                _out(f"  {C.cyan('${{' + key + '}}')}  ←  redacted")
+                shown.add(key)
+
+    if still_dirty:
+        _err(f"\n[skillsyncer] {len(still_dirty)} secret(s) could not be auto-shielded "
+             f"(no matching credential in identity):")
+        for d in still_dirty:
             _err(f"  {d.get('file', '?')}:{d['line']}: {d['pattern_label']}")
         _err("")
-        _err("[skillsyncer] Files were copied but NOT committed.")
-        _err(f"[skillsyncer] Fix these in your agent dirs first, then re-run publish.")
-        _err(f"[skillsyncer] Or run: cd {target_path} && skillsyncer guard --fix")
-        return 1
+        _err("[skillsyncer] Run `skillsyncer init` so SkillSyncer learns these values,")
+        _err("[skillsyncer] then re-publish — they will be replaced automatically.")
+        _err("[skillsyncer] Committing anyway; verify these are not real secrets.")
+        _err("")
 
     published = copied + referenced
     if not published:
@@ -1269,10 +1298,18 @@ def cmd_publish(args: argparse.Namespace) -> int:
         for name, n in sorted(ph_counts.items(), key=lambda x: -x[1])[:10]:
             _out(f"    {C.dim(GLYPH_BULLET)} ${{{{{name}}}}} \u00d7{n}")
     else:
-        _out(C.dim(
-            "\u26a0\ufe0f  0 credentials shielded — run `skillsyncer init` then "
-            "`skillsyncer guard --fix` to template hardcoded values into placeholders."
-        ))
+        if secrets:
+            _out(C.dim(
+                "\u26a0\ufe0f  0 credentials shielded — no known credentials found in these "
+                "skill files. If they contain hardcoded secrets not yet in your identity, "
+                "run `skillsyncer init` to register them; next publish will auto-shield them."
+            ))
+        else:
+            _out(C.dim(
+                "\u26a0\ufe0f  0 credentials shielded — SkillSyncer doesn\u2019t know your "
+                "credentials yet. Run `skillsyncer init` once so it can auto-replace "
+                "hardcoded values with ${{...}} placeholders on every future publish."
+            ))
 
     _print_next_steps([
         (
