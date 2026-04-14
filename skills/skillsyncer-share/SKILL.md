@@ -81,21 +81,12 @@ Or the user may prefer to clean up the skill in its **original
 agent dir** first (since that's where they'll edit it next time),
 then re-run publish.
 
-### 6. Hand off to the user for push
+### 6. Push upstream
 
-After the commit lands, tell the user:
-
-> "I committed N skill(s) to the <source> repo. Run this to send
->  them upstream:
->
->      git -C ~/.skillsyncer/repos/<source> push
->
->  The pre-push hook will run a final security scan. Anyone who
->  pulls the repo will get SkillSyncer auto-installed by their
->  agent — the preamble I injected handles that."
-
-Do **not** push for them. Pushing is an explicit user action and
-the pre-push hook is the final security gate. Let them see it run.
+`skillsyncer publish` pushes automatically after the commit.
+The pre-push hook runs a final security scan before the push
+goes out. If the push fails (e.g. no network, auth error), the
+CLI will print a fallback command — surface it to the user.
 
 ## Rules
 
@@ -103,8 +94,8 @@ the pre-push hook is the final security gate. Let them see it run.
   is letting the user choose which local-state-accumulated skills
   are ready to share. `--all` is for someone who really knows
   what's in their agent dirs.
-- **Don't push for them.** Stop at the commit. The push is the
-  user's decision and the hook's final opportunity to block.
+- **Let the CLI push.** `skillsyncer publish` handles the push
+  automatically. Only surface the fallback command if it fails.
 - **Fail loud on pre-flight detections.** If publish finds secrets,
   surface them immediately and switch into guard-assist mode. Do
   not try to auto-fix by guessing names.
@@ -116,5 +107,4 @@ the pre-push hook is the final security gate. Let them see it run.
 ## Done criteria
 
 - Pre-flight scan passed.
-- A commit exists in the source repo with the published skill(s).
-- The user knows the exact `git push` command to send upstream.
+- Skills are committed and pushed to the source repo.

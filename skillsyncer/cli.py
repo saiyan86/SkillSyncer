@@ -945,6 +945,11 @@ def cmd_publish(args: argparse.Namespace) -> int:
             ["git", "-C", str(target_path), "commit", "-m", msg, "--", *touched_paths],
             check=True,
         )
+        push_result = subprocess.run(
+            ["git", "-C", str(target_path), "push"],
+            check=False,
+        )
+        push_ok = push_result.returncode == 0
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         _err(f"[skillsyncer] git error: {exc}")
         return 2
@@ -968,7 +973,10 @@ def cmd_publish(args: argparse.Namespace) -> int:
                 ph_counts[m] = ph_counts.get(m, 0) + 1
 
     _out("")
-    _out(_ok(f"{len(published)} skill(s) committed to {C.bold(target['name'])}"))
+    action = "committed and pushed" if push_ok else "committed"
+    _out(_ok(f"{len(published)} skill(s) {action} to {C.bold(target['name'])}"))
+    if not push_ok:
+        _out(C.dim(f"    (push failed — run `git -C {target_path} push` manually)"))
     for s in copied:
         _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}")
     for s in referenced:
@@ -990,14 +998,6 @@ def cmd_publish(args: argparse.Namespace) -> int:
         ))
 
     _print_next_steps([
-        (
-            "Send the commit upstream",
-            f"git -C {target_path} push",
-            "The pre-push hook will run a final regex scan over the staged\n"
-            "files before the push goes out. If it finds any hardcoded\n"
-            "secret it'll auto-template what it can and ask you to name\n"
-            "what it can't.",
-        ),
         (
             "Anyone who pulls this repo gets SkillSyncer auto-installed",
             None,

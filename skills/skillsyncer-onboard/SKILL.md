@@ -33,7 +33,10 @@ iwr -useb https://raw.githubusercontent.com/saiyan86/SkillSyncer/main/install.ps
 
 Verify: `skillsyncer --version` exits 0.
 
-### 2. Get the scan plan WITHOUT reading any credentials
+### 2. Run init immediately — no permission needed for this step
+
+`skillsyncer init --json` does NOT read any credential values.
+Run it automatically as soon as the binary is confirmed present:
 
 ```
 skillsyncer init --json
@@ -47,31 +50,26 @@ This returns a proposal including:
 - `credentials` — **empty** (scan hasn't run yet)
 - `git` — gh auth state
 
-You are responsible for asking the user for consent BEFORE SkillSyncer
-reads any of those files. The CLI's own `init` has a consent prompt
-but the agent path uses `--json` precisely so you own this step.
+### 3. Ask ONE consent question, then immediately run init
 
-### 3. Present the scan plan
-
-Show the user the locations grouped by kind:
+Show the user the credential scan plan grouped by kind:
 
 - Project files (`./.env*`, `./docker-compose.yml`)
 - User home (`~/.env*`, `~/.kube/config`)
 - Shell environment (matched credential-shaped vars)
 - AI tool config dirs (`~/.claude`, `~/.cursor`, `~/.openclaw`, etc.)
 
-Tell them plainly: **"Values stay on this machine. Only key names are
-ever printed. OK to scan?"**
+Ask: **"Values stay on this machine. Only key names are ever printed.
+OK to scan?"** Then immediately run based on their answer — do not
+wait for any further confirmation.
 
-### 4. If they say yes, run the actual scan
+If yes:
 
 ```
 skillsyncer init --yes
 ```
 
-`--yes` skips the CLI's own consent prompt since you already handled it.
-
-### 5. If they say no
+If no:
 
 ```
 skillsyncer init --no-scan
@@ -80,7 +78,7 @@ skillsyncer init --no-scan
 Still creates `~/.skillsyncer/` with an empty `identity.yaml`. Explain
 they can add secrets by hand later with `skillsyncer secret-set`.
 
-### 6. Present the discovery summary
+### 4. Present the discovery summary
 
 After the scan runs, show:
 
@@ -89,7 +87,7 @@ After the scan runs, show:
 - Which credentials were discovered (KEY NAMES only — never values)
 - Which credentials are needed but not yet found
 
-### 7. Ask about a source repo (one question, three choices)
+### 5. Ask about a source repo (one question, three choices)
 
 > "Do you want to sync your skills across machines?
 >  A) Create a new private GitHub repo for me (`gh repo create`)
@@ -103,7 +101,7 @@ If B, run `skillsyncer add <url>`.
 
 If C, do nothing. Tell them they can run `skillsyncer add` later.
 
-### 8. Render
+### 6. Render
 
 ```
 skillsyncer render
@@ -111,7 +109,7 @@ skillsyncer render
 
 Fills every `${{...}}` placeholder SkillSyncer can resolve.
 
-### 9. Hand off to FILL if anything is still missing
+### 7. Hand off to FILL if anything is still missing
 
 If `skillsyncer render` exits non-zero, some skills still need
 credentials. Load the `skillsyncer-fill` skill and run its process.
