@@ -896,12 +896,45 @@ def cmd_publish(args: argparse.Namespace) -> int:
         _err(f"[skillsyncer] git error: {exc}")
         return 2
 
+    # Credential-protection summary: count ${{...}} placeholders across
+    # the vendored skills we just committed. Referenced stubs have none
+    # by construction. This gives the user instant feedback on how many
+    # credential values are shielded from the source repo.
+    import re as _re
+    _ph_pattern = _re.compile(r"\$\{\{([A-Z_][A-Z0-9_]*)\}\}")
+    ph_counts: dict[str, int] = {}
+    ph_files: set[str] = set()
+    for s in copied:
+        for f, _ in _iter_skill_files(target_path / s["name"]):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for m in _ph_pattern.findall(text):
+                ph_files.add(str(f))
+                ph_counts[m] = ph_counts.get(m, 0) + 1
+
     _out("")
     _out(_ok(f"{len(published)} skill(s) committed to {C.bold(target['name'])}"))
     for s in copied:
         _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}")
     for s in referenced:
         _out(f"    {C.dim(GLYPH_BULLET)} {s['name']} {C.dim('(reference)')}")
+
+    _out("")
+    if ph_counts:
+        total_ph = sum(ph_counts.values())
+        _out(C.bold(
+            f"\U0001f512 {len(ph_counts)} credential(s) shielded via "
+            f"{total_ph} placeholder(s) across {len(ph_files)} file(s)"
+        ))
+        for name, n in sorted(ph_counts.items(), key=lambda x: -x[1])[:10]:
+            _out(f"    {C.dim(GLYPH_BULLET)} ${{{{{name}}}}} \u00d7{n}")
+    else:
+        _out(C.dim(
+            "\u26a0\ufe0f  0 credentials shielded — run `skillsyncer init` then "
+            "`skillsyncer guard --fix` to template hardcoded values into placeholders."
+        ))
 
     _print_next_steps([
         (
