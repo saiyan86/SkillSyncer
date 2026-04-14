@@ -632,9 +632,12 @@ def _wizard_continue(proposal: dict) -> None:
     _out(C.cyan("  " + BOX_V) + done_text + C.cyan(BOX_V))
     _out(C.cyan("  " + BOX_BL + _BOX_H * inner_width + BOX_BR))
     _out("")
+    config = read_config()
+    if config.get("sources"):
+        _out(C.dim("  skillsyncer pull     \u2014 get new skills published by teammates"))
+    _out(C.dim("  skillsyncer publish  \u2014 share your skills upstream"))
+    _out(C.dim("  skillsyncer skills   \u2014 list everything installed"))
     _out(C.dim("  skillsyncer status   \u2014 health check"))
-    _out(C.dim("  skillsyncer skills   \u2014 list installed skills"))
-    _out(C.dim("  skillsyncer publish  \u2014 share more skills upstream"))
     _out("")
 
 
@@ -2306,6 +2309,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # sync — pull every source then render
     p = sub.add_parser("sync", help="Git pull every source repo, then render all skills.")
+    p.set_defaults(func=cmd_sync)
+
+    # pull — friendly alias for sync
+    p = sub.add_parser("pull", help="Pull latest skills from all source repos, then render. Alias for sync.")
     p.set_defaults(func=cmd_sync)
 
     # doctor — diagnostics
