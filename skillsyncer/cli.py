@@ -194,7 +194,12 @@ def _print_next_steps(steps: list[tuple[str, str | None, str]]) -> None:
 
     Each step is ``(title, command_or_None, explanation)``. The
     explanation may be multi-line; lines are dimmed.
+
+    Suppressed when ``_WIZARD_MODE`` is True so intermediate boxes
+    don't interrupt the wizard flow.
     """
+    if _WIZARD_MODE:
+        return
     _out("")
     _out(C.bold(C.yellow("\u250c\u2500 What's next? \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")))
     for i, (title, command, explanation) in enumerate(steps, 1):
@@ -463,6 +468,10 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 _BOX_H = "\u2500"           # ─  (light horizontal, for wizard step dividers)
 
+# When True, _print_next_steps is suppressed so intermediate "What's next?"
+# boxes from cmd_add / cmd_render don't interrupt the wizard flow.
+_WIZARD_MODE = False
+
 
 def _onboard_step(n: int, total: int, title: str) -> None:
     """Print a coloured step header: ─── Step n/total · title ─────────────"""
@@ -479,6 +488,15 @@ def _wizard_continue(proposal: dict) -> None:
     Shared between ``cmd_onboard`` (which runs all 4 steps) and the
     interactive path of ``cmd_init`` (which has already done step 1).
     """
+    global _WIZARD_MODE
+    _WIZARD_MODE = True
+    try:
+        _wizard_continue_inner(proposal)
+    finally:
+        _WIZARD_MODE = False
+
+
+def _wizard_continue_inner(proposal: dict) -> None:
     TOTAL_STEPS = 4
 
     # ── Step 2: Source repo ────────────────────────────────────────────────────
@@ -585,7 +603,14 @@ def _wizard_continue(proposal: dict) -> None:
         _out(C.dim("  Run `skillsyncer render` after adding a source."))
     else:
         render_args = argparse.Namespace(report_path=None)
-        cmd_render(render_args)
+        rc = cmd_render(render_args)
+        if rc == 0:
+            # Aha moment: show every skill now available in the agent dirs
+            _out("")
+            _out(C.bold("  Your skills \u2014 available in every connected agent:"))
+            _out("")
+            skills_args = argparse.Namespace(agent=None, json=False)
+            cmd_skills(skills_args)
 
     # ── Step 4: Publish ────────────────────────────────────────────────────────
     _onboard_step(4, TOTAL_STEPS, "Publish your skills to the repo (optional)")
