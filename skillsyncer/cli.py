@@ -1605,8 +1605,18 @@ def cmd_render(args: argparse.Namespace) -> int:
     _out("")
     _out(_ok(C.bold(f"Rendered {len(fill_report['skills'])} skill(s)")))
     if fill_report.get("written"):
-        target_count = len({Path(p).parent.parent for p in fill_report['written']})
-        _out(C.dim(f"  Written into {target_count} agent dir(s)."))
+        home = Path.home()
+        # Group written paths by agent dir (grandparent of each SKILL.md)
+        by_agent_dir: dict[Path, int] = {}
+        for p in fill_report["written"]:
+            agent_dir = Path(p).parent.parent
+            by_agent_dir[agent_dir] = by_agent_dir.get(agent_dir, 0) + 1
+        for agent_dir, count in sorted(by_agent_dir.items(), key=lambda x: x[0]):
+            try:
+                display = "~/" + str(agent_dir.relative_to(home))
+            except ValueError:
+                display = str(agent_dir)
+            _out(f"  {C.dim(GLYPH_ARROW)} {C.cyan(display)}  {C.dim(f'({count} skills)')}")
     _print_next_steps([
         (
             "Use your skills",
