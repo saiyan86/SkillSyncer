@@ -474,12 +474,12 @@ def _onboard_step(n: int, total: int, title: str) -> None:
 
 
 def _wizard_continue(proposal: dict) -> None:
-    """Steps 2 & 3 of the setup wizard: source repo → render → done box.
+    """Steps 2–4 of the setup wizard: source repo → render → publish → done.
 
-    Shared between ``cmd_onboard`` (which runs all 3 steps) and the
+    Shared between ``cmd_onboard`` (which runs all 4 steps) and the
     interactive path of ``cmd_init`` (which has already done step 1).
     """
-    TOTAL_STEPS = 3
+    TOTAL_STEPS = 4
 
     # ── Step 2: Source repo ────────────────────────────────────────────────────
     _onboard_step(2, TOTAL_STEPS, "Connect a skills repo (optional)")
@@ -587,6 +587,43 @@ def _wizard_continue(proposal: dict) -> None:
         render_args = argparse.Namespace(report_path=None)
         cmd_render(render_args)
 
+    # ── Step 4: Publish ────────────────────────────────────────────────────────
+    _onboard_step(4, TOTAL_STEPS, "Publish your skills to the repo (optional)")
+
+    config = read_config()
+    has_source = bool(config.get("sources"))
+    has_local_skills = bool(proposal.get("existing_skills"))
+
+    if not has_source:
+        _out("")
+        _out(C.dim("  No source repo \u2014 skipping. Connect one first with `skillsyncer add`."))
+    elif not has_local_skills:
+        _out("")
+        _out(C.dim("  No local skills found \u2014 nothing to publish yet."))
+    elif not sys.stdin.isatty():
+        _out("")
+        _out(C.dim("  (non-interactive \u2014 skipping publish)"))
+    else:
+        _out("")
+        _out("  Copy your local skills into the connected repo so teammates")
+        _out("  (and your other machines) can pull them in.")
+        _out("")
+        _out(f"  {C.bold(C.yellow('[Y]'))}  Publish skills now")
+        _out(f"  {C.bold(C.yellow('[S]'))}  Skip for now")
+        _out("")
+        try:
+            raw = input(
+                f"  {C.bold(C.yellow(GLYPH_PROMPT))}  Choice [Y/S]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _out("")
+            raw = "s"
+        if raw in ("y", "yes", ""):
+            publish_args = argparse.Namespace(source=None, all=False, skill=[])
+            cmd_publish(publish_args)
+        else:
+            _out(C.dim("  Skipped. Run `skillsyncer publish` whenever you\u2019re ready."))
+
     # ── Done ───────────────────────────────────────────────────────────────────
     done_text = f"  {C.green(GLYPH_CHECK)}  {C.bold('Setup complete')}"
     inner_width = 56
@@ -597,16 +634,16 @@ def _wizard_continue(proposal: dict) -> None:
     _out("")
     _out(C.dim("  skillsyncer status   \u2014 health check"))
     _out(C.dim("  skillsyncer skills   \u2014 list installed skills"))
-    _out(C.dim("  skillsyncer publish  \u2014 share a skill upstream"))
+    _out(C.dim("  skillsyncer publish  \u2014 share more skills upstream"))
     _out("")
 
 
 def cmd_onboard(_args: argparse.Namespace) -> int:
-    """Interactive setup wizard: init → source repo → render."""
+    """Interactive setup wizard: init → source repo → render → publish."""
 
     home = paths.home()
     already_init = (home / "config.yaml").exists()
-    TOTAL_STEPS = 3
+    TOTAL_STEPS = 4
 
     # ── Welcome ───────────────────────────────────────────────────────────────
     _print_banner()
@@ -614,7 +651,7 @@ def cmd_onboard(_args: argparse.Namespace) -> int:
         _out(C.dim(f"  Re-running onboarding. Existing config at {home}"))
         _out(C.dim("  Nothing is wiped \u2014 we\u2019ll update what\u2019s needed."))
     else:
-        _out(C.bold("  Let\u2019s get you set up in three steps."))
+        _out(C.bold("  Let\u2019s get you set up in four steps."))
     _out("")
 
     # ── Step 1: Credential scan ───────────────────────────────────────────────
