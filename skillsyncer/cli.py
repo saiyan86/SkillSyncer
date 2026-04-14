@@ -1994,18 +1994,33 @@ def cmd_dev_purge(args: argparse.Namespace) -> int:
         _out("[skillsyncer] nothing to purge — repo already has no tracked files.")
         return 0
 
+    # Resolve the upstream remote so we can name it in the warning.
+    remote_proc = subprocess.run(
+        ["git", "-C", str(target_path), "remote", "get-url", "origin"],
+        capture_output=True, text=True, check=False,
+    )
+    remote_url = remote_proc.stdout.strip() if remote_proc.returncode == 0 else None
+
     # ── Danger warning ────────────────────────────────────────────────
     _err("")
     _err(C.yellow("  ══════════════════════════════════════════════════"))
     _err(C.yellow(f"  ⚠️   DEV PURGE — {C.bold(target['name'])}"))
     _err(C.yellow("  ══════════════════════════════════════════════════"))
     _err("")
-    _err(f"  Repo:  {target_path}")
-    _err(f"  Files: {len(tracked)} tracked file(s) will be permanently deleted")
-    _err(f"  A git commit will record the deletion.")
+    _err(f"  Local clone:  {target_path}")
+    if remote_url:
+        _err(f"  Upstream:     {remote_url}")
+    _err(f"  Files:        {len(tracked)} tracked file(s) will be permanently deleted")
     _err("")
-    _err("  This only affects the local clone — nothing is pushed.")
-    _err("  But once committed, recovery requires the remote or a reflog.")
+    if args.push:
+        if not remote_url:
+            _err(C.red("  --push requested but no origin remote found. Aborting."))
+            return 2
+        _err(C.red("  --push is set: the purge commit will be pushed to the upstream."))
+        _err(C.red("  THIS CANNOT BE UNDONE without force-pushing a recovery commit."))
+    else:
+        _err("  Local only — nothing is pushed unless you pass --push.")
+        _err("  Recovery is possible via the remote or a local reflog.")
     _err("")
 
     if args.yes:
@@ -2039,9 +2054,24 @@ def cmd_dev_purge(args: argparse.Namespace) -> int:
         return 2
 
     _out("")
-    _out(_ok(f"Purged {len(tracked)} file(s) from {C.bold(target['name'])}"))
+    _out(_ok(f"Purged {len(tracked)} file(s) from {C.bold(target['name'])} (local)"))
+
+    if args.push:
+        _out(C.dim(f"  Pushing to {remote_url}…"))
+        try:
+            subprocess.run(
+                ["git", "-C", str(target_path), "push"],
+                check=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            _err(f"[skillsyncer] push failed: {exc}")
+            _err("  Local purge commit is intact — fix the push manually.")
+            return 2
+        _out(_ok("Pushed purge commit to upstream."))
+
     _out(C.dim("  Repo is now empty. Run `skillsyncer publish --all` to repopulate."))
-    _out(C.dim(f"  Push when ready:  git -C {target_path} push"))
+    if not args.push:
+        _out(C.dim(f"  Push when ready:  git -C {target_path} push"))
     return 0
 
 
@@ -2260,6 +2290,10 @@ def _build_parser() -> argparse.ArgumentParser:
     dp.add_argument(
         "--yes", "-y", action="store_true",
         help="Skip the confirmation prompt (dangerous — use only in scripts).",
+    )
+    dp.add_argument(
+        "--push", action="store_true",
+        help="Also push the purge commit to the upstream remote (irreversible without force-push).",
     )
     dp.set_defaults(func=cmd_dev_purge)
 
