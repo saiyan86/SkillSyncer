@@ -1095,6 +1095,55 @@ def _inject_preamble_if_missing(skill_md: Path) -> None:
     atomic_write(skill_md, preamble + "\n" + content)
 
 
+def _inject_upstream_note(
+    skill_md: Path,
+    name: str,
+    agent: str,
+    upstream: str,
+) -> None:
+    """Insert a <!-- skillsyncer:upstream --> comment block into a vendored
+    SKILL.md so that agents know the original source and can prompt the user
+    whether to switch to the live upstream version instead of the snapshot.
+
+    The block is placed right after the SkillSyncer preamble (or at the top
+    if no preamble is present). It is idempotent — re-running publish with
+    the same upstream won't duplicate the block.
+    """
+    if not skill_md.is_file():
+        return
+    content = skill_md.read_text(encoding="utf-8")
+    marker = "skillsyncer:upstream"
+    if marker in content:
+        return  # already present (possibly from a prior publish run)
+
+    note = (
+        f"<!-- {marker}\n"
+        f"VENDORED SNAPSHOT — original source: {upstream}\n"
+        f"\n"
+        f"AGENT: before running this skill, ask the user:\n"
+        f'  "This skill was vendored from {upstream}.\n'
+        f"   Do you want to install the live upstream version instead of\n"
+        f"   this snapshot? (recommended if you want the latest changes)\"\n"
+        f"\n"
+        f"  If YES — run:\n"
+        f"    git clone {upstream} ~/.{agent}/skills/{name}\n"
+        f"  then reload the skill from the cloned directory.\n"
+        f"\n"
+        f"  If NO — continue with this vendored snapshot as-is.\n"
+        f"-->\n"
+    )
+
+    # Insert after the preamble block if present, otherwise prepend.
+    end_tag = "<!-- skillsyncer:end -->"
+    if end_tag in content:
+        insert_at = content.index(end_tag) + len(end_tag)
+        new_content = content[:insert_at] + "\n\n" + note + content[insert_at:]
+    else:
+        new_content = note + "\n" + content
+
+    atomic_write(skill_md, new_content)
+
+
 def cmd_publish(args: argparse.Namespace) -> int:
     config = read_config()
     target, err = _resolve_publish_target(config, args.source)
@@ -1158,8 +1207,11 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
         _copy_skill_tree(skill["dir"], dst_dir)
         _inject_preamble_if_missing(dst_dir / "SKILL.md")
-        copied.append(skill)
-        _out(f"  \u2713 {skill['name']:<28} (from {skill['agent']})")
+        if upstream:
+            _inject_upstream_note(dst_dir / "SKILL.md", skill["name"], skill["agent"], upstream)
+        copied.append({**skill, "upstream": upstream})
+        suffix = f" (snapshot of {upstream})" if upstream else f" (from {skill['agent']})"
+        _out(f"  \u2713 {skill['name']:<28}{suffix}")
 
     # Pre-flight scan + auto-guard: scan every copied file for hardcoded
     # secrets. If the identity has matching values, replace them in-place
@@ -1223,7 +1275,10 @@ def cmd_publish(args: argparse.Namespace) -> int:
         "",
     ]
     for s in copied:
-        msg_lines.append(f"- {s['name']}")
+        if s.get("upstream"):
+            msg_lines.append(f"- {s['name']} (vendored snapshot of {s['upstream']})")
+        else:
+            msg_lines.append(f"- {s['name']}")
     for s in referenced:
         msg_lines.append(f"- {s['name']} (reference \u2192 {s['upstream']})")
     msg = "\n".join(msg_lines)
