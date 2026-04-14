@@ -428,26 +428,32 @@ def cmd_init(args: argparse.Namespace) -> int:
         if git.get("gh_authenticated"):
             _out(f"  {C.green(GLYPH_CHECK)} {C.dim('gh CLI authenticated — `skillsyncer add` can clone private repos.')}")
 
-    _print_next_steps([
-        (
-            "Register a skills repo to sync skills across machines",
-            "skillsyncer add git@github.com:you/agent-skills.git",
-            "Clones the repo into ~/.skillsyncer/repos/, installs the\n"
-            "pre-push and post-merge git hooks, and tracks it as a source.",
-        ),
-        (
-            "List every skill SkillSyncer can see",
-            "skillsyncer skills",
-            "Shows all SKILL.md files found in your detected agent dirs,\n"
-            "grouped by agent, with placeholder / hardcoded-secret flags.",
-        ),
-        (
-            "Hydrate ${{...}} placeholders into your agent dirs",
-            "skillsyncer render",
-            "Reads any registered source repo and writes rendered skills\n"
-            "into ~/.claude/skills/, ~/.cursor/skills/, etc.",
-        ),
-    ])
+    # When run interactively (no flags, not piped) continue into the wizard
+    # so the user never has to type follow-up commands. The JSON / --yes /
+    # --no-scan paths are headless — keep their existing next-steps output.
+    if sys.stdin.isatty() and not args.as_json:
+        _wizard_continue(proposal)
+    else:
+        _print_next_steps([
+            (
+                "Register a skills repo to sync skills across machines",
+                "skillsyncer add git@github.com:you/agent-skills.git",
+                "Clones the repo into ~/.skillsyncer/repos/, installs the\n"
+                "pre-push and post-merge git hooks, and tracks it as a source.",
+            ),
+            (
+                "List every skill SkillSyncer can see",
+                "skillsyncer skills",
+                "Shows all SKILL.md files found in your detected agent dirs,\n"
+                "grouped by agent, with placeholder / hardcoded-secret flags.",
+            ),
+            (
+                "Hydrate ${{...}} placeholders into your agent dirs",
+                "skillsyncer render",
+                "Reads any registered source repo and writes rendered skills\n"
+                "into ~/.claude/skills/, ~/.cursor/skills/, etc.",
+            ),
+        ])
     return 0
 
 
@@ -467,91 +473,13 @@ def _onboard_step(n: int, total: int, title: str) -> None:
     _out("  " + C.bold(C.cyan(_BOX_H * left + label + _BOX_H * right)))
 
 
-def cmd_onboard(_args: argparse.Namespace) -> int:
-    """Interactive setup wizard: init → source repo → render."""
+def _wizard_continue(proposal: dict) -> None:
+    """Steps 2 & 3 of the setup wizard: source repo → render → done box.
 
-    home = paths.home()
-    already_init = (home / "config.yaml").exists()
+    Shared between ``cmd_onboard`` (which runs all 3 steps) and the
+    interactive path of ``cmd_init`` (which has already done step 1).
+    """
     TOTAL_STEPS = 3
-
-    # ── Welcome ───────────────────────────────────────────────────────────────
-    _print_banner()
-    if already_init:
-        _out(C.dim(f"  Re-running onboarding. Existing config at {home}"))
-        _out(C.dim("  Nothing is wiped \u2014 we\u2019ll update what\u2019s needed."))
-    else:
-        _out(C.bold("  Let\u2019s get you set up in three steps."))
-    _out("")
-
-    # ── Step 1: Credential scan ───────────────────────────────────────────────
-    _onboard_step(1, TOTAL_STEPS, "Scan your environment")
-
-    home.mkdir(parents=True, exist_ok=True)
-
-    with _Spinner("probing your environment"):
-        preview = discover(scan_credentials=False)
-
-    scan_creds = _consent_prompt(preview["credential_scan_plan"])
-
-    with _Spinner("reading credentials" if scan_creds else "initialising"):
-        proposal = discover(scan_credentials=scan_creds)
-
-    config = read_config()
-    config.setdefault("sources", [])
-    if not config.get("targets"):
-        config["targets"] = [
-            {"name": a["name"], "path": a["path"], "found": a["found"]}
-            for a in proposal["agents"] if a["found"]
-        ] or detect_targets()
-    write_config(config)
-
-    if not paths.identity_path().exists():
-        write_identity({"secrets": {}, "overrides": {}})
-
-    # Discovery summary
-    found_agents = [a for a in proposal["agents"] if a["found"]]
-    _out("")
-    if found_agents:
-        _out(_section("Agents") + C.dim(f"  ({len(found_agents)})"))
-        for a in found_agents:
-            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(a['name']):<22} {C.dim(a['path'])}")
-    else:
-        _out(_section("Agents") + C.dim("  (none detected)"))
-
-    if proposal["existing_skills"]:
-        SKILLS_PER_AGENT = 6
-        by_agent_skills: dict[str, list[dict]] = {}
-        for s in proposal["existing_skills"]:
-            by_agent_skills.setdefault(s["agent"], []).append(s)
-        _out("")
-        _out(_section("Skills") + C.dim(f"  ({len(proposal['existing_skills'])})"))
-        for agent_name in sorted(by_agent_skills):
-            group = by_agent_skills[agent_name]
-            _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
-            for s in group[:SKILLS_PER_AGENT]:
-                tags = []
-                if s["has_placeholders"]:
-                    tags.append(C.cyan("placeholders"))
-                if s["has_hardcoded_secrets"]:
-                    tags.append(C.red("hardcoded-secret"))
-                tail = f"  [{', '.join(tags)}]" if tags else ""
-                _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}{tail}")
-            if len(group) > SKILLS_PER_AGENT:
-                _out(C.dim(f"    {GLYPH_BULLET} \u2026 and {len(group) - SKILLS_PER_AGENT} more"))
-
-    if proposal.get("credential_scan_performed") and proposal["credentials"]:
-        by_cred_key: dict[str, list[dict]] = {}
-        for c in proposal["credentials"]:
-            by_cred_key.setdefault(c["key"], []).append(c)
-        _out("")
-        _out(_section("Credentials") + C.dim(f"  ({len(by_cred_key)} found)"))
-        for key in sorted(by_cred_key):
-            cands = by_cred_key[key]
-            src = sorted({c["source"] for c in cands})[0]
-            _out(f"  {C.green(GLYPH_CHECK)}  {C.bold(key):<32} {C.dim(src)}")
-    elif not proposal.get("credential_scan_performed"):
-        _out("")
-        _out(C.dim("  Credential scan skipped. Run `skillsyncer init --yes` to scan later."))
 
     # ── Step 2: Source repo ────────────────────────────────────────────────────
     _onboard_step(2, TOTAL_STEPS, "Connect a skills repo (optional)")
@@ -660,7 +588,7 @@ def cmd_onboard(_args: argparse.Namespace) -> int:
         cmd_render(render_args)
 
     # ── Done ───────────────────────────────────────────────────────────────────
-    done_text = f"  {C.green(GLYPH_CHECK)}  {C.bold('Onboarding complete')}"
+    done_text = f"  {C.green(GLYPH_CHECK)}  {C.bold('Setup complete')}"
     inner_width = 56
     _out("")
     _out(C.cyan("  " + BOX_TL + _BOX_H * inner_width + BOX_TR))
@@ -671,6 +599,95 @@ def cmd_onboard(_args: argparse.Namespace) -> int:
     _out(C.dim("  skillsyncer skills   \u2014 list installed skills"))
     _out(C.dim("  skillsyncer publish  \u2014 share a skill upstream"))
     _out("")
+
+
+def cmd_onboard(_args: argparse.Namespace) -> int:
+    """Interactive setup wizard: init → source repo → render."""
+
+    home = paths.home()
+    already_init = (home / "config.yaml").exists()
+    TOTAL_STEPS = 3
+
+    # ── Welcome ───────────────────────────────────────────────────────────────
+    _print_banner()
+    if already_init:
+        _out(C.dim(f"  Re-running onboarding. Existing config at {home}"))
+        _out(C.dim("  Nothing is wiped \u2014 we\u2019ll update what\u2019s needed."))
+    else:
+        _out(C.bold("  Let\u2019s get you set up in three steps."))
+    _out("")
+
+    # ── Step 1: Credential scan ───────────────────────────────────────────────
+    _onboard_step(1, TOTAL_STEPS, "Scan your environment")
+
+    home.mkdir(parents=True, exist_ok=True)
+
+    with _Spinner("probing your environment"):
+        preview = discover(scan_credentials=False)
+
+    scan_creds = _consent_prompt(preview["credential_scan_plan"])
+
+    with _Spinner("reading credentials" if scan_creds else "initialising"):
+        proposal = discover(scan_credentials=scan_creds)
+
+    config = read_config()
+    config.setdefault("sources", [])
+    if not config.get("targets"):
+        config["targets"] = [
+            {"name": a["name"], "path": a["path"], "found": a["found"]}
+            for a in proposal["agents"] if a["found"]
+        ] or detect_targets()
+    write_config(config)
+
+    if not paths.identity_path().exists():
+        write_identity({"secrets": {}, "overrides": {}})
+
+    # Discovery summary
+    found_agents = [a for a in proposal["agents"] if a["found"]]
+    _out("")
+    if found_agents:
+        _out(_section("Agents") + C.dim(f"  ({len(found_agents)})"))
+        for a in found_agents:
+            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(a['name']):<22} {C.dim(a['path'])}")
+    else:
+        _out(_section("Agents") + C.dim("  (none detected)"))
+
+    if proposal["existing_skills"]:
+        SKILLS_PER_AGENT = 6
+        by_agent_skills: dict[str, list[dict]] = {}
+        for s in proposal["existing_skills"]:
+            by_agent_skills.setdefault(s["agent"], []).append(s)
+        _out("")
+        _out(_section("Skills") + C.dim(f"  ({len(proposal['existing_skills'])})"))
+        for agent_name in sorted(by_agent_skills):
+            group = by_agent_skills[agent_name]
+            _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
+            for s in group[:SKILLS_PER_AGENT]:
+                tags = []
+                if s["has_placeholders"]:
+                    tags.append(C.cyan("placeholders"))
+                if s["has_hardcoded_secrets"]:
+                    tags.append(C.red("hardcoded-secret"))
+                tail = f"  [{', '.join(tags)}]" if tags else ""
+                _out(f"    {C.dim(GLYPH_BULLET)} {s['name']}{tail}")
+            if len(group) > SKILLS_PER_AGENT:
+                _out(C.dim(f"    {GLYPH_BULLET} \u2026 and {len(group) - SKILLS_PER_AGENT} more"))
+
+    if proposal.get("credential_scan_performed") and proposal["credentials"]:
+        by_cred_key: dict[str, list[dict]] = {}
+        for c in proposal["credentials"]:
+            by_cred_key.setdefault(c["key"], []).append(c)
+        _out("")
+        _out(_section("Credentials") + C.dim(f"  ({len(by_cred_key)} found)"))
+        for key in sorted(by_cred_key):
+            cands = by_cred_key[key]
+            src = sorted({c["source"] for c in cands})[0]
+            _out(f"  {C.green(GLYPH_CHECK)}  {C.bold(key):<32} {C.dim(src)}")
+    elif not proposal.get("credential_scan_performed"):
+        _out("")
+        _out(C.dim("  Credential scan skipped. Run `skillsyncer init --yes` to scan later."))
+
+    _wizard_continue(proposal)
     return 0
 
 
