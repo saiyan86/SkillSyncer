@@ -1498,8 +1498,13 @@ def cmd_skills(args: argparse.Namespace) -> int:
     _out(_section("Local skills") + C.dim(f"  ({total})"))
     for agent_name in sorted(by_agent):
         group = by_agent[agent_name]
+        agent_dir = group[0]["dir"].parent
+        try:
+            display_path = "~/" + str(agent_dir.relative_to(Path.home()))
+        except ValueError:
+            display_path = str(agent_dir)
         _out("")
-        _out(f"  {C.bold(agent_name)} {C.dim(f'({len(group)})')}")
+        _out(f"  {C.bold(agent_name)}  {C.cyan(display_path)}  {C.dim(f'({len(group)})')}")
         for s in sorted(group, key=lambda x: x["name"]):
             md = s["md"]
             tags = []
@@ -2098,28 +2103,80 @@ def cmd_status(_args: argparse.Namespace) -> int:
     identity = read_identity()
     state = read_state()
     skills = _iter_skills(config)
+    home = Path.home()
 
-    _out(f"home:    {paths.home()}")
-    _out(f"sources: {len(config.get('sources') or [])}")
-    _out(f"targets: {len(config.get('targets') or [])}")
-    _out(f"secrets: {len(identity.get('secrets') or {})} stored")
     _out("")
 
+    # ── Header ────────────────────────────────────────────────────────────────
+    _out(f"  {C.bold('home')}     {C.dim(str(paths.home()))}")
+    _out(f"  {C.bold('secrets')}  {len(identity.get('secrets') or {})} stored")
+    _out("")
+
+    # ── Sources ───────────────────────────────────────────────────────────────
+    sources = config.get("sources") or []
+    _out(_section("Sources") + C.dim(f"  ({len(sources)})"))
+    if sources:
+        for src in sources:
+            src_path = Path(src.get("path", "")).expanduser()
+            try:
+                display = "~/" + str(src_path.relative_to(home))
+            except ValueError:
+                display = str(src_path)
+            _out(f"  {C.green(GLYPH_CHECK)} {C.bold(src.get('name', '?')):<20} {C.cyan(display)}")
+    else:
+        _out(C.dim("  (none — run `skillsyncer add <url>` to connect a repo)"))
+    _out("")
+
+    # ── Agents ────────────────────────────────────────────────────────────────
+    targets = config.get("targets") or []
+    _out(_section("Agents") + C.dim(f"  ({len(targets)})"))
+    if targets:
+        for target in sorted(targets, key=lambda t: t.get("name", "")):
+            tpath = Path(target.get("path", "")).expanduser()
+            try:
+                display = "~/" + str(tpath.relative_to(home))
+            except ValueError:
+                display = str(tpath)
+            if tpath.is_dir():
+                try:
+                    skill_count = sum(
+                        1 for d in tpath.iterdir()
+                        if d.is_dir() and not d.name.startswith(".") and (d / "SKILL.md").is_file()
+                    )
+                except OSError:
+                    skill_count = 0
+                count_str = C.dim(f"({skill_count} skills)")
+                mark = C.green(GLYPH_CHECK)
+            else:
+                count_str = C.yellow("(dir not found)")
+                mark = C.red(GLYPH_CROSS)
+            _out(f"  {mark} {C.bold(target.get('name', '?')):<20} {C.cyan(display)}  {count_str}")
+    else:
+        _out(C.dim("  (none — run `skillsyncer init` to detect agents)"))
+    _out("")
+
+    # ── Skills ────────────────────────────────────────────────────────────────
     if not skills:
-        _out("(no skills found)")
+        _out(C.dim("  (no skills in source repos — run `skillsyncer add <url>` first)"))
         return 0
 
     _, missing = auto_fill(skills, identity, env={})
-    _out("skills:")
+    miss_count = sum(1 for v in missing.values() if v)
+    synced_count = len(skills) - miss_count
+    cred_note = f", {C.yellow(f'{miss_count} missing credentials')}" if miss_count else ""
+    _out(_section("Skills") + C.dim(f"  ({synced_count} synced{cred_note})"))
     for name in sorted(skills):
         skill_state = (state.get("skills") or {}).get(name) or {}
         recorded = skill_state.get("hash", "\u2014")[:8] if skill_state.get("hash") else "\u2014"
         miss = missing.get(name) or []
-        marker = "synced" if not miss else f"missing {len(miss)}"
-        _out(f"  {name:<28} {recorded:<10} {marker}")
+        if miss:
+            marker = C.yellow(f"missing {len(miss)}")
+        else:
+            marker = C.dim("synced")
+        _out(f"  {name:<30} {C.dim(recorded):<18} {marker}")
         for m in miss:
             tail = f" \u2014 {m['description']}" if m["description"] else ""
-            _out(f"      need {m['key']}{tail}")
+            _out(f"      {C.cyan('need')} {m['key']}{tail}")
     return 0
 
 
