@@ -482,6 +482,51 @@ def _onboard_step(n: int, total: int, title: str) -> None:
     _out("  " + C.bold(C.cyan(_BOX_H * left + label + _BOX_H * right)))
 
 
+def _show_installed_skills() -> None:
+    """Aha moment: list every skill physically on disk in each agent dir.
+
+    Reads the target dirs from config and walks them directly — this
+    proves the files are truly installed, not just tracked by SkillSyncer.
+    """
+    config = read_config()
+    targets = config.get("targets") or []
+    home = Path.home()
+
+    any_shown = False
+    for target in targets:
+        tpath = Path(target.get("path", "")).expanduser()
+        if not tpath.is_dir():
+            continue
+        try:
+            skill_dirs = sorted(
+                d for d in tpath.iterdir()
+                if d.is_dir() and not d.name.startswith(".") and (d / "SKILL.md").is_file()
+            )
+        except OSError:
+            continue
+        if not skill_dirs:
+            continue
+        any_shown = True
+
+        display_path = "~/" + str(tpath.relative_to(home)) if tpath.is_relative_to(home) else str(tpath)
+        agent_label = C.bold(target.get("name", tpath.name))
+        _out(f"  {C.green(GLYPH_CHECK)}  {agent_label}  {C.cyan(display_path)}  {C.dim(f'({len(skill_dirs)} skills)')}")
+
+        names = [d.name for d in skill_dirs]
+        PER_ROW = 5
+        MAX_ROWS = 3
+        shown = names[: PER_ROW * MAX_ROWS]
+        for i in range(0, len(shown), PER_ROW):
+            row = shown[i : i + PER_ROW]
+            _out("       " + C.dim("  ".join(row)))
+        if len(names) > len(shown):
+            _out("       " + C.dim(f"… and {len(names) - len(shown)} more"))
+        _out("")
+
+    if not any_shown:
+        _out(C.dim("  (no agent dirs found — run `skillsyncer init` to detect agents)"))
+
+
 def _wizard_continue(proposal: dict) -> None:
     """Steps 2–4 of the setup wizard: source repo → render → publish → done.
 
@@ -605,12 +650,10 @@ def _wizard_continue_inner(proposal: dict) -> None:
         render_args = argparse.Namespace(report_path=None)
         rc = cmd_render(render_args)
         if rc == 0:
-            # Aha moment: show every skill now available in the agent dirs
             _out("")
-            _out(C.bold("  Your skills \u2014 available in every connected agent:"))
+            _out(C.bold("  Skills now live in your agents:"))
             _out("")
-            skills_args = argparse.Namespace(agent=None, json=False)
-            cmd_skills(skills_args)
+            _show_installed_skills()
 
     # ── Step 4: Publish ────────────────────────────────────────────────────────
     _onboard_step(4, TOTAL_STEPS, "Publish your skills to the repo (optional)")
