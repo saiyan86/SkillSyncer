@@ -15,6 +15,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -54,6 +56,52 @@ _TEXT_EXTENSIONS = {
 # ---------------------------------------------------------------------------
 # Color + visual helpers
 # ---------------------------------------------------------------------------
+
+
+class _Spinner:
+    """Context-manager spinner for blocking operations.
+
+    Shows an animated indicator on stderr while work runs on the main
+    thread. Degrades gracefully: if stderr isn't a TTY (CI, pipes) it
+    prints a plain "msg..." line instead of animating.
+
+    Usage::
+
+        with _Spinner("cloning YCSkills"):
+            subprocess.run(["git", "clone", ...], check=True)
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, msg: str) -> None:
+        self._msg = msg
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> "_Spinner":
+        if sys.stderr.isatty():
+            self._thread.start()
+        else:
+            sys.stderr.write(f"  {self._msg}…\n")
+            sys.stderr.flush()
+        return self
+
+    def __exit__(self, *_) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
+        if sys.stderr.isatty():
+            # Erase the spinner line.
+            sys.stderr.write("\r" + " " * (len(self._msg) + 6) + "\r")
+            sys.stderr.flush()
+
+    def _run(self) -> None:
+        i = 0
+        while not self._stop.wait(0.1):
+            frame = self._FRAMES[i % len(self._FRAMES)]
+            sys.stderr.write(f"\r  {frame} {self._msg}…")
+            sys.stderr.flush()
+            i += 1
 
 
 class C:
@@ -274,10 +322,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     else:
         # Interactive: do a no-cred discover first so we can show the
         # plan, then ask the user.
-        preview = discover(scan_credentials=False)
+        with _Spinner("scanning your environment"):
+            preview = discover(scan_credentials=False)
         scan_creds = _consent_prompt(preview["credential_scan_plan"])
 
-    proposal = discover(scan_credentials=scan_creds)
+    with _Spinner("reading credentials"):
+        proposal = discover(scan_credentials=scan_creds)
 
     if args.as_json:
         safe = dict(proposal)
@@ -420,18 +470,23 @@ def cmd_add(args: argparse.Namespace) -> int:
         local_path = str(Path(url).resolve())
     else:
         if target.exists():
-            _out(f"[skillsyncer] {name} already cloned, pulling\u2026")
-            subprocess.run(
-                ["git", "-C", str(target), "pull", "--ff-only"],
-                check=False,
-            )
+            with _Spinner(f"pulling latest {name}"):
+                subprocess.run(
+                    ["git", "-C", str(target), "pull", "--ff-only"],
+                    check=False,
+                    capture_output=True,
+                )
         else:
-            _out(f"[skillsyncer] cloning {url} \u2192 {target}")
-            try:
-                subprocess.run(["git", "clone", url, str(target)], check=True)
-            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                _err(f"[skillsyncer] git clone failed: {exc}")
-                return 2
+            with _Spinner(f"cloning {url}"):
+                try:
+                    subprocess.run(
+                        ["git", "clone", "--quiet", url, str(target)],
+                        check=True,
+                        capture_output=True,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                    _err(f"[skillsyncer] git clone failed: {exc}")
+                    return 2
         local_path = str(target)
         try:
             hooks.install_hooks(local_path)
@@ -677,32 +732,30 @@ def _ask_publish_mode(skill_name: str, upstream: str) -> str:
         return "vendor"
 
     _out("")
-    _out(f"  {C.bold(skill_name)} is its own git repo")
-    _out(f"    origin: {C.dim(upstream)}")
+    _out(f"  {C.bold(C.yellow(skill_name))} is its own independently versioned project.")
+    _out(f"  {C.dim('origin: ' + upstream)}")
     _out("")
-    _out(f"    {C.bold('vendor')}     copy the entire skill into the source repo")
-    _out("                + frozen snapshot, fully auditable")
-    _out("                - balloons the source repo, build artifacts may trip the scanner")
+    _out(  "  Vendoring it copies the full source tree into your skills repo —")
+    _out(  "  every build artifact, test fixture, and binary. That's the source")
+    _out(  "  of most secret-scanner false positives and inflated repo size.")
+    _out(  "  A reference stub is usually the right call for a skill like this.")
     _out("")
-    _out(f"    {C.bold('reference')}  write a one-line pointer to the upstream")
-    _out("                + source repo stays small")
-    _out("                + teammates always pull the latest upstream version")
-    _out("                - if upstream moves or breaks, this skill breaks too")
-    _out("")
-    _out(f"    {C.bold('skip')}       don't publish this skill at all")
+    _out(f"    {C.bold('vendor')}     copy the full tree (frozen snapshot, fully auditable)")
+    _out(f"    {C.bold('reference')}  one-line stub pointing teammates at the upstream")
+    _out(f"    {C.bold('skip')}       leave this skill out of the publish entirely")
     _out("")
     while True:
         try:
             answer = input(
-                f"  How to publish {skill_name}? [v]endor / [r]eference / [s]kip (default v): "
+                f"  How to publish {skill_name}? [v]endor / [r]eference / [s]kip (default r): "
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             _out("")
             return "skip"
-        if answer in ("", "v", "vendor"):
-            return "vendor"
-        if answer in ("r", "ref", "reference"):
+        if answer in ("r", "ref", "reference", ""):
             return "reference"
+        if answer in ("v", "vendor"):
+            return "vendor"
         if answer in ("s", "skip"):
             return "skip"
         _out("    please answer v / r / s")
