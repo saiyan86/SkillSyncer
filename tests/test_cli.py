@@ -93,9 +93,13 @@ def test_init_groups_duplicate_credentials(home, capsys, monkeypatch, tmp_path):
 
 def test_init_consent_prompt_yes(home, capsys, monkeypatch):
     monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
-    # Pretend stdin is a TTY and the user types "y\n".
+    # Pretend stdin is a TTY. cmd_init prompts twice: first for credential-scan
+    # consent, then for the source-repo wizard choice. Empty string accepts
+    # the wizard's default ("skip"); without it, the wizard loops on invalid
+    # input.
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    answers = iter(["y", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers, ""))
     rc = _invoke("init")
     assert rc == 0
     out = capsys.readouterr().out
@@ -106,7 +110,8 @@ def test_init_consent_prompt_yes(home, capsys, monkeypatch):
 def test_init_consent_prompt_no(home, capsys, monkeypatch):
     monkeypatch.setenv("STEPONEAI_API_KEY", "step-secret-1234567890")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    answers = iter(["n", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers, ""))
     rc = _invoke("init")
     assert rc == 0
     out = capsys.readouterr().out

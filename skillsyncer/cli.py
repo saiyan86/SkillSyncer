@@ -1376,15 +1376,17 @@ def cmd_publish(args: argparse.Namespace) -> int:
                 shown.add(key)
 
     if still_dirty:
-        _err(f"\n[skillsyncer] {len(still_dirty)} secret(s) could not be auto-shielded "
+        _err(f"\n[skillsyncer] pre-flight scan blocked publish: "
+             f"{len(still_dirty)} secret(s) could not be auto-shielded "
              f"(no matching credential in identity):")
         for d in still_dirty:
             _err(f"  {d.get('file', '?')}:{d['line']}: {d['pattern_label']}")
         _err("")
         _err("[skillsyncer] Run `skillsyncer init` so SkillSyncer learns these values,")
         _err("[skillsyncer] then re-publish — they will be replaced automatically.")
-        _err("[skillsyncer] Committing anyway; verify these are not real secrets.")
+        _err("[skillsyncer] Nothing was committed.")
         _err("")
+        return 1
 
     published = copied + referenced
     if not published:
