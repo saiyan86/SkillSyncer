@@ -565,6 +565,62 @@ def test_skill_show_unknown(fake_machine, capsys):
     assert "no skill" in err or "not found" in err
 
 
+def test_skill_show_finds_skill_in_custom_target_dir(home, tmp_path, monkeypatch, capsys):
+    """Regression: when an agent uses a non-default skills dir
+    (e.g. ``~/.hermes/profiles/cpo/skills``) registered as a config
+    target, ``skill show <name>`` must still find an installed skill
+    there — matching what ``status`` reports."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: fake_home))
+
+    # Custom target dir, not in any of the default _AGENT_CANDIDATES.
+    custom_target = fake_home / ".hermes" / "profiles" / "cpo" / "skills"
+    custom_target.mkdir(parents=True)
+    skill_dir = custom_target / "edgenesis-pptx"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# pptx", encoding="utf-8")
+
+    # Register the custom target in config.yaml.
+    cfg = {
+        "sources": [],
+        "targets": [{"name": "hermes-cpo", "path": str(custom_target)}],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    capsys.readouterr()
+    rc = _invoke("skill", "show", "edgenesis-pptx")
+    assert rc == 0, capsys.readouterr().err
+    out = capsys.readouterr().out
+    assert "edgenesis-pptx" in out
+
+
+def test_skill_show_falls_back_to_source_repo(home, tmp_path, monkeypatch, capsys):
+    """If a skill exists in a registered source but hasn't been rendered
+    to any agent dir yet, ``skill show`` should still be able to inspect
+    it rather than claim it doesn't exist."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: fake_home))
+
+    src = tmp_path / "src"
+    skill = src / "edgenesis-pptx"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# from source\n", encoding="utf-8")
+
+    cfg = {
+        "sources": [{"name": "edgenesis", "path": str(src)}],
+        "targets": [],
+    }
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    rc = _invoke("skill", "show", "edgenesis-pptx")
+    assert rc == 0, capsys.readouterr().err
+    out = capsys.readouterr().out
+    assert "edgenesis-pptx" in out
+    assert "source:edgenesis" in out
+
+
 def test_sync_no_sources(home, capsys):
     _invoke("init", "--no-scan")
     capsys.readouterr()
