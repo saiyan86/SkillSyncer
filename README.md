@@ -217,6 +217,40 @@ Three things to notice:
 3. The skill is committable. The values come from your local
    `~/.skillsyncer/identity.yaml`, which is **never** in a git repo.
 
+### What gets rendered
+
+`skillsyncer render` walks **the entire skill directory**, not just
+`SKILL.md`. For each skill in a registered source, every file is
+either rendered (text files) or copied byte-for-byte (binary assets):
+
+```
+edgenesis-pptx/                              edgenesis-pptx/
+├── SKILL.md            <-- ${{...}}        ├── SKILL.md           (rendered)
+├── manifest.yaml       <-- ${{...}}        ├── manifest.yaml      (rendered)
+├── assets/                          ───►   ├── assets/
+│   ├── bg_wavy.png     (binary)            │   ├── bg_wavy.png    (copied)
+│   └── logo.svg        (binary)            │   └── logo.svg       (copied)
+├── templates/                              ├── templates/
+│   └── slide.md        <-- ${{...}}        │   └── slide.md       (rendered)
+└── scripts/                                └── scripts/
+    └── build.sh        <-- ${{...}}            └── build.sh       (rendered)
+```
+
+Rules:
+
+- Files whose extension is in the text whitelist (`.md`, `.yaml`,
+  `.json`, `.sh`, `.py`, `.ts`, `.html`, `.css`, …) are rendered.
+- Everything else (`.png`, `.jpg`, `.webp`, `.pdf`, `.svg`, fonts,
+  archives, office docs, compiled artifacts) is copied byte-for-byte.
+- VCS metadata (`.git`, `.hg`, `.svn`), package caches
+  (`node_modules`, `__pycache__`, `.pytest_cache`, `.venv`, …),
+  build artifacts (`dist`, `build`, `.next`), and OS junk (`.DS_Store`,
+  `Thumbs.db`) are skipped.
+- Subdirectories like `assets/`, `templates/`, `scripts/`,
+  `references/` are preserved.
+- Writes are atomic: each file lands via tmp+rename in the destination
+  directory, so a partial render is never visible at the target path.
+
 ### The two flows
 
 **Pull flow** (deterministic, then agent):
@@ -460,6 +494,57 @@ are still left alone. To remove those too, delete them by hand —
 SkillSyncer never touches files outside its own home dir without
 an explicit per-file command.
 
+### Private skill repos (GitHub App / token auth)
+
+When the source repo lives behind GitHub App auth (or any other HTTP
+auth scheme git understands), pass an extra header to `add` / `sync`
+/ `pull`. SkillSyncer feeds it to git as `-c http.extraHeader=...`
+so the credential never lives in the remote URL.
+
+**One-shot, with the token computed inline:**
+
+```bash
+TOKEN="$(./scripts/github_app_token.py)"          # whatever your tooling is
+HEADER="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+
+skillsyncer add https://github.com/Edgenesis/skills.git \
+  --name edgenesis-skills \
+  --git-extra-header "$HEADER"
+```
+
+**Persistent, via env var (good for headless / CI):**
+
+```bash
+export SKILLSYNCER_GIT_HTTP_EXTRA_HEADER="Authorization: Basic $(...)"
+skillsyncer add  https://github.com/Edgenesis/skills.git --name edgenesis-skills
+skillsyncer sync           # the same env var is picked up here too
+```
+
+**What is and isn't persisted:**
+
+- The header value is **never** written to `config.yaml`, `state.yaml`,
+  or any report. It only exists for the lifetime of the process.
+- If you used `--git-extra-header` (or the env var) at `add` time,
+  SkillSyncer remembers `requires_auth: true` on that source — a
+  boolean reminder, not the secret — so `sources show` can prompt you
+  to provide auth again on the next `sync`.
+- If git itself prints the header into stderr on a clone error,
+  SkillSyncer redacts it before re-emitting.
+
+**Recommended workflow for private skills repos**
+
+1. `skillsyncer add <git-url> --git-extra-header "$HEADER"` — clone +
+   register.
+2. Set `SKILLSYNCER_GIT_HTTP_EXTRA_HEADER` in the shell profile (or
+   inject it from a secrets manager) so subsequent `skillsyncer sync`
+   / `skillsyncer pull` calls just work.
+3. Use a short-lived GitHub App installation token over a long-lived
+   PAT when possible. Rotate by re-exporting the env var; nothing
+   inside `~/.skillsyncer/` needs to change.
+4. To go offline (no network at all), clone the repo by hand with your
+   own auth flow, then `skillsyncer add --no-clone --name <alias>
+   <local-path>` to register it without re-cloning.
+
 ### What `init` writes
 
 ```
@@ -627,7 +712,11 @@ skillsyncer init --yes                    # skip the credential-scan consent pro
 skillsyncer init --no-scan                # skip credential scanning entirely
 
 skillsyncer add <git-url> [--name=NAME]   # clone, install hooks, register a source
+skillsyncer add <git-url> --git-extra-header "Authorization: Basic ..."
+                                          # for private / GitHub App-protected repos
 skillsyncer sync                          # git pull every source, then render
+skillsyncer sync --git-extra-header ...   # pass auth to git pull as well
+skillsyncer pull                          # alias for sync
 skillsyncer doctor                        # diagnose hooks, sources, missing tools
 ```
 

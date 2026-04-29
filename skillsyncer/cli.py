@@ -25,6 +25,7 @@ import yaml
 from . import __version__, hooks, paths
 from ._io import atomic_write
 from .config import detect_targets, read_config, write_config
+from .git import build_git_argv, get_extra_header
 from .discoverer import _discover_agents, discover
 from .filler import auto_fill
 from .guarder import guard_fix
@@ -811,6 +812,9 @@ def cmd_add(args: argparse.Namespace) -> int:
     target = paths.repos_dir() / name
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    extra_header = get_extra_header(getattr(args, "git_extra_header", None))
+    requires_auth = bool(extra_header)
+
     if args.no_clone:
         if not Path(url).is_dir():
             _err(f"--no-clone requires an existing dir: {url}")
@@ -820,7 +824,10 @@ def cmd_add(args: argparse.Namespace) -> int:
         if target.exists():
             with _Spinner(f"pulling latest {name}"):
                 subprocess.run(
-                    ["git", "-C", str(target), "pull", "--ff-only"],
+                    build_git_argv(
+                        ["-C", str(target), "pull", "--ff-only"],
+                        extra_header=extra_header,
+                    ),
                     check=False,
                     capture_output=True,
                 )
@@ -828,12 +835,21 @@ def cmd_add(args: argparse.Namespace) -> int:
             with _Spinner(f"cloning {url}"):
                 try:
                     subprocess.run(
-                        ["git", "clone", "--quiet", url, str(target)],
+                        build_git_argv(
+                            ["clone", "--quiet", url, str(target)],
+                            extra_header=extra_header,
+                        ),
                         check=True,
                         capture_output=True,
                     )
                 except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                    _err(f"[skillsyncer] git clone failed: {exc}")
+                    # Stderr from git can contain redirect URLs; the
+                    # header value itself never appears there, but we
+                    # redact for defense in depth.
+                    msg = str(exc)
+                    if extra_header:
+                        msg = msg.replace(extra_header, "<redacted>")
+                    _err(f"[skillsyncer] git clone failed: {msg}")
                     return 2
         local_path = str(target)
         try:
@@ -844,12 +860,20 @@ def cmd_add(args: argparse.Namespace) -> int:
 
     config = read_config()
     sources = config.setdefault("sources", [])
+    new_entry = {"name": name, "url": url, "path": local_path}
+    if requires_auth:
+        # Persist *only* the boolean — never the header value itself.
+        new_entry["requires_auth"] = True
     for src in sources:
         if src.get("name") == name:
-            src.update({"name": name, "url": url, "path": local_path})
+            src.update(new_entry)
+            # Drop a stale requires_auth flag if the user re-added
+            # the source without auth this time.
+            if not requires_auth and "requires_auth" in src:
+                src.pop("requires_auth", None)
             break
     else:
-        sources.append({"name": name, "url": url, "path": local_path})
+        sources.append(new_entry)
     write_config(config)
     _out("")
     _out(_ok(f"Added source {C.bold(name)}") + "  " + C.dim(local_path))
@@ -888,34 +912,62 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 def _find_local_skills() -> list[dict]:
     """Return ``[{name, agent, dir, md}]`` for every depth-1 skill
-    found under each detected agent dir."""
+    found under each known agent dir.
+
+    "Known" agent dirs come from two sources, deduped:
+      1. The built-in ``_discover_agents`` candidate paths (Claude
+         Code, Cursor, Hermes default, etc.).
+      2. Custom paths registered as ``targets`` in ``config.yaml``
+         (e.g. user-configured ``~/.hermes/profiles/cpo/skills``).
+
+    This keeps ``skillsyncer skill show <name>`` consistent with
+    ``skillsyncer status`` for users who pointed targets at non-default
+    paths.
+    """
     home_path = Path.home()
     out: list[dict] = []
     seen: set[str] = set()
-    for agent in _discover_agents(home_path):
-        agent_dir = Path(agent["path"])
+    seen_dirs: set[str] = set()
+
+    def _scan_dir(agent_name: str, agent_dir: Path) -> None:
+        key = str(agent_dir.resolve()) if agent_dir.exists() else str(agent_dir)
+        if key in seen_dirs:
+            return
+        seen_dirs.add(key)
         if not agent_dir.is_dir():
-            continue
+            return
         try:
             children = sorted(agent_dir.iterdir())
         except OSError:
-            continue
+            return
         for child in children:
             if not child.is_dir() or child.name.startswith("."):
                 continue
             md = child / "SKILL.md"
             if not md.is_file():
                 continue
-            key = str(md.resolve())
-            if key in seen:
+            md_key = str(md.resolve())
+            if md_key in seen:
                 continue
-            seen.add(key)
+            seen.add(md_key)
             out.append({
                 "name": child.name,
-                "agent": agent["name"],
+                "agent": agent_name,
                 "dir": child,
                 "md": md,
             })
+
+    for agent in _discover_agents(home_path):
+        _scan_dir(agent["name"], Path(agent["path"]))
+
+    # Also scan any custom target dirs declared in config.yaml.
+    config = read_config()
+    for target in config.get("targets") or []:
+        path = target.get("path")
+        if not path:
+            continue
+        _scan_dir(target.get("name") or "custom", Path(path).expanduser())
+
     return out
 
 
@@ -1768,6 +1820,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _err("[skillsyncer] no sources registered. Run `skillsyncer add <git-url>` first.")
         return 2
 
+    extra_header = get_extra_header(getattr(args, "git_extra_header", None))
+
     _out("")
     _out(_section("Pulling sources") + C.dim(f"  ({len(sources)})"))
     pulled: list[str] = []
@@ -1786,7 +1840,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             continue
         try:
             proc = subprocess.run(
-                ["git", "-C", str(repo), "pull", "--ff-only"],
+                build_git_argv(
+                    ["-C", str(repo), "pull", "--ff-only"],
+                    extra_header=extra_header,
+                ),
                 capture_output=True, text=True, check=True,
             )
             summary = proc.stdout.strip().splitlines()
@@ -1795,6 +1852,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             _out(f"  {C.green(GLYPH_CHECK)} {C.bold(name):<20} {C.dim(tail)}")
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
             err = getattr(exc, "stderr", "").strip() or str(exc)
+            if extra_header:
+                err = err.replace(extra_header, "<redacted>")
             failed.append((name, err))
             _out(f"  {C.red(GLYPH_CROSS)} {C.bold(name):<20} {C.red(err[:60])}")
 
@@ -1970,6 +2029,10 @@ def cmd_sources_show(args: argparse.Namespace) -> int:
     _out(_section(f"Source: {match.get('name')}"))
     for k, v in match.items():
         _out(f"  {C.dim(k + ':'):<10} {v}")
+    if match.get("requires_auth"):
+        _out("")
+        _out(C.dim("  (this source requires auth; pass --git-extra-header"))
+        _out(C.dim("   or set $SKILLSYNCER_GIT_HTTP_EXTRA_HEADER for sync/pull)"))
 
     repo = Path(match.get("path") or "").expanduser()
     if repo.is_dir():
@@ -2032,8 +2095,32 @@ def cmd_hooks_status(args: argparse.Namespace) -> int:
 
 def cmd_skill_show(args: argparse.Namespace) -> int:
     matches = [s for s in _find_local_skills() if s["name"] == args.name]
+
+    # Fallback: look in registered source repos. ``status`` lists those
+    # under "Skills (N synced)", so it would be confusing for `skill
+    # show <name>` to claim no such skill exists when status just
+    # reported it.
     if not matches:
-        _err(f"[skillsyncer] no skill named '{args.name}' found in any agent dir.")
+        config = read_config()
+        for source in config.get("sources") or []:
+            repo_path = source.get("path") or source.get("local_path")
+            if not repo_path:
+                continue
+            cand = Path(repo_path).expanduser() / args.name
+            md = cand / "SKILL.md"
+            if md.is_file():
+                matches.append({
+                    "name": args.name,
+                    "agent": f"source:{source.get('name', '?')}",
+                    "dir": cand,
+                    "md": md,
+                })
+
+    if not matches:
+        _err(
+            f"[skillsyncer] no skill named '{args.name}' found in any agent "
+            f"dir or source repo."
+        )
         return 2
 
     import re as _re
@@ -2408,6 +2495,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", default=None, help="Alias for this source.")
     p.add_argument("--no-clone", dest="no_clone", action="store_true",
                    help="Skip git clone (use a local path).")
+    p.add_argument("--git-extra-header", dest="git_extra_header", default=None,
+                   metavar="HEADER",
+                   help="HTTP header passed to git via -c http.extraHeader=... "
+                        "(for private repos / GitHub App auth). The value is "
+                        "never written to config or logs. Can also be set via "
+                        "$SKILLSYNCER_GIT_HTTP_EXTRA_HEADER.")
     p.set_defaults(func=cmd_add)
 
     # render
@@ -2444,10 +2537,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # sync — pull every source then render
     p = sub.add_parser("sync", help="Git pull every source repo, then render all skills.")
+    p.add_argument("--git-extra-header", dest="git_extra_header", default=None,
+                   metavar="HEADER",
+                   help="HTTP header passed to git via -c http.extraHeader=... "
+                        "(for private repos / GitHub App auth). Also reads "
+                        "$SKILLSYNCER_GIT_HTTP_EXTRA_HEADER.")
     p.set_defaults(func=cmd_sync)
 
     # pull — friendly alias for sync
     p = sub.add_parser("pull", help="Pull latest skills from all source repos, then render. Alias for sync.")
+    p.add_argument("--git-extra-header", dest="git_extra_header", default=None,
+                   metavar="HEADER",
+                   help="HTTP header passed to git via -c http.extraHeader=... "
+                        "(for private repos / GitHub App auth). Also reads "
+                        "$SKILLSYNCER_GIT_HTTP_EXTRA_HEADER.")
     p.set_defaults(func=cmd_sync)
 
     # doctor — diagnostics
