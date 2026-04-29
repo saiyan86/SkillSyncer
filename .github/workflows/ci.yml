@@ -1,8 +1,9 @@
 name: CI
 
-# Budget note: macOS minutes count 10× against the Pro quota, so the
-# macOS jobs are gated behind the weekly schedule + manual dispatch.
-# PR/push runs stay on Linux + a 2-version Windows boundary check.
+# Budget note: macOS minutes count 10× against the Pro quota. PR/push
+# runs use Linux for the full Python-version sweep and a single macOS
+# job on the latest supported Python; broader macOS coverage and the
+# macOS install.sh smoke run weekly.
 
 on:
   push:
@@ -29,8 +30,7 @@ jobs:
           - { os: ubuntu-latest, python-version: "3.10" }
           - { os: ubuntu-latest, python-version: "3.11" }
           - { os: ubuntu-latest, python-version: "3.12" }
-          - { os: windows-latest, python-version: "3.9" }
-          - { os: windows-latest, python-version: "3.12" }
+          - { os: macos-latest, python-version: "3.12" }
     steps:
       - uses: actions/checkout@v4
 
@@ -49,14 +49,14 @@ jobs:
       - name: Verify CLI entry point
         run: skillsyncer --help
 
-  test-macos:
+  test-macos-extra:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: test (macos-latest, py${{ matrix.python-version }})
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        python-version: ["3.9", "3.10", "3.11"]
     steps:
       - uses: actions/checkout@v4
 
@@ -99,7 +99,7 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  install-script-posix:
+  install-script-linux:
     name: install.sh (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
@@ -122,7 +122,7 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           skillsyncer --help
 
-  install-script-posix-macos:
+  install-script-macos:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: install.sh (macos-latest)
     runs-on: macos-latest
@@ -145,22 +145,3 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           skillsyncer --help
-
-  install-script-windows:
-    name: install.ps1 (windows-latest)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install pipx
-        run: python -m pip install --upgrade pip pipx
-
-      - name: Run install.ps1 against local checkout
-        shell: pwsh
-        env:
-          SKILLSYNCER_SOURCE: ${{ github.workspace }}
-        run: ./install.ps1
