@@ -50,7 +50,7 @@ skillsyncer/
 [project]
 name = "skillsyncer"
 version = "0.1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "click>=8.0",
     "pyyaml>=6.0",

@@ -483,7 +483,7 @@ SkillSyncer is small on purpose. Here's the entire footprint:
 
 | Layer                  | What                                                       |
 | ---------------------- | ---------------------------------------------------------- |
-| **Runtime**            | Python 3.9+                                                |
+| **Runtime**            | Python 3.12+                                               |
 | **Standard library**   | `argparse`, `json`, `pathlib`, `subprocess`, `re`, `hashlib`, `tempfile`, `os` — that's the whole CLI |
 | **Third-party**        | **`pyyaml`** (one package, used to read user-authored `manifest.yaml`, `docker-compose.yml`, `~/.kube/config`) |
 | **Bundled**            | One ~200-line Markdown skill (`operator/SKILL.md`) and two short shell hook templates |

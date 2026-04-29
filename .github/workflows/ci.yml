@@ -1,9 +1,8 @@
 name: CI
 
-# Budget note: macOS minutes count 10× against the Pro quota. PR/push
-# runs use Linux for the full Python-version sweep and a single macOS
-# job on the latest supported Python; broader macOS coverage and the
-# macOS install.sh smoke run weekly.
+# Budget note: macOS minutes count 10× against the Pro quota. The
+# macOS install.sh smoke runs weekly; PR/push runs do test + build
+# on Linux + a single macOS test job.
 
 on:
   push:
@@ -18,52 +17,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: "3.12"
+
 jobs:
   test:
-    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, python-version: "3.9" }
-          - { os: ubuntu-latest, python-version: "3.10" }
-          - { os: ubuntu-latest, python-version: "3.11" }
-          - { os: ubuntu-latest, python-version: "3.12" }
-          - { os: macos-latest, python-version: "3.12" }
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install package with dev extras
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
-
-      - name: Run tests
-        run: python -m pytest -v
-
-      - name: Verify CLI entry point
-        run: skillsyncer --help
-
-  test-macos-extra:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: test (macos-latest, py${{ matrix.python-version }})
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.10", "3.11"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install package with dev extras
@@ -83,7 +53,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install build tooling
@@ -107,7 +77,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install pipx
         run: python -m pip install --upgrade pip pipx
@@ -131,7 +101,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install pipx
         run: python -m pip install --upgrade pip pipx
