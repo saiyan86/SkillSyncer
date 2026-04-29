@@ -24,3 +24,6 @@ packages = ["skillsyncer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that drive the installed `skillsyncer` binary via subprocess (slower; can be selected with `-m e2e` or excluded with `-m 'not e2e'`).",
+]
